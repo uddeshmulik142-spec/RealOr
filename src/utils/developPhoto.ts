@@ -71,17 +71,32 @@ export async function developPhoto(
   let outputFile: File | undefined;
 
   try {
-    const sourceFile = new File(toFileUri(photoPath));
-    if (!sourceFile.exists) {
-      throw new Error('The captured photo file does not exist.');
+    const fileUri = toFileUri(photoPath);
+    const response = await fetch(fileUri);
+    if (!response.ok) {
+      throw new Error(`Unable to read the captured photo (HTTP ${response.status}).`);
     }
 
-    const base64Data = await sourceFile.base64();
-    if (!base64Data) {
+    const blob = await response.blob();
+    if (blob.size === 0) {
       throw new Error('Captured photo file was empty.');
     }
 
-    data = Skia.Data.fromBase64(base64Data);
+    const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error ?? new Error('Failed to read captured photo data.'));
+      reader.onabort = () => reject(new Error('Reading captured photo data was aborted.'));
+      reader.onload = () => {
+        if (!(reader.result instanceof ArrayBuffer)) {
+          reject(new Error('Captured photo data was not read as an ArrayBuffer.'));
+          return;
+        }
+        resolve(reader.result);
+      };
+      reader.readAsArrayBuffer(blob);
+    });
+
+    data = Skia.Data.fromBytes(new Uint8Array(arrayBuffer));
     sourceImage = Skia.Image.MakeImageFromEncoded(data);
     if (!sourceImage) {
       throw new Error('Unable to decode the captured photo. Invalid image buffer.');
