@@ -7,9 +7,21 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "RealOr uses the camera to capture photos for analysis.",
+        "NSPhotoLibraryAddUsageDescription": "RealOr saves developed photos to your camera roll.",
+        "NSPhotoLibraryUsageDescription": "RealOr needs photo library access to save developed photos."
+      }
     },
     "android": {
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -20,6 +32,23 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "RealOr needs photo library access to save developed photos.",
+          "savePhotosPermission": "RealOr saves developed photos to your camera roll.",
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f59b0ef9-8159-4e13-9b26-59485e716bd7"
+      }
     }
   }
 }
