@@ -1,3 +1,5 @@
+import { Skia } from '@shopify/react-native-skia';
+
 export type FilmProfile = 0 | 1 | 2;
 
 export interface FilmShaderSettings {
@@ -103,3 +105,17 @@ half4 main(float2 position) {
   return half4(clamp(srgb, 0.0, 1.0), centerSample.a);
 }
 `;
+
+let cachedFilmRuntimeEffect: ReturnType<typeof Skia.RuntimeEffect.Make> | undefined;
+
+export function createFilmRuntimeEffect() {
+  if (cachedFilmRuntimeEffect === undefined) {
+    cachedFilmRuntimeEffect = Skia.RuntimeEffect.Make(filmShaderSource);
+  }
+
+  if (cachedFilmRuntimeEffect === null) {
+    throw new Error('Unable to compile the film shader.');
+  }
+
+  return cachedFilmRuntimeEffect;
+}

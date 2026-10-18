@@ -1,4 +1,7 @@
-import { File, Paths } from 'expo-file-system';
+import {
+  File,
+  Paths,
+} from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import {
   FilterMode,
@@ -6,22 +9,16 @@ import {
   MipmapMode,
   Skia,
   TileMode,
+  type SkData,
+  type SkImage,
+  type SkPaint,
+  type SkShader,
+  type SkSurface,
 } from '@shopify/react-native-skia';
-import { filmShaderSource, type FilmShaderSettings } from '../shaders/filmShader';
-
-let compiledFilmShader: ReturnType<typeof Skia.RuntimeEffect.Make> | undefined;
-
-function getCompiledFilmShader() {
-  if (compiledFilmShader === undefined) {
-    compiledFilmShader = Skia.RuntimeEffect.Make(filmShaderSource);
-  }
-
-  if (compiledFilmShader === null) {
-    throw new Error('Unable to compile the film shader.');
-  }
-
-  return compiledFilmShader;
-}
+import {
+  createFilmRuntimeEffect,
+  type FilmShaderSettings,
+} from '../shaders/filmShader';
 
 function clampIntensity(value: number, name: string) {
   if (!Number.isFinite(value)) {
@@ -46,7 +43,7 @@ function toFileUri(pathOrUri: string) {
 export async function developPhoto(
   pathOrUri: string,
   settings: FilmShaderSettings,
-): Promise<void> {
+): Promise<string> {
   if (![0, 1, 2].includes(settings.profile)) {
     throw new RangeError('Film profile must be 0, 1, or 2.');
   }
@@ -58,66 +55,77 @@ export async function developPhoto(
     throw new RangeError('Shader seed must be a finite number.');
   }
 
-  const shaderEffect = getCompiledFilmShader();
-  const data = await Skia.Data.fromURI(toFileUri(pathOrUri));
-  const sourceImage = Skia.Image.MakeImageFromEncoded(data);
-  if (!sourceImage) {
-    data.dispose();
-    throw new Error('Unable to decode the captured photo.');
-  }
-
-  const width = sourceImage.width();
-  const height = sourceImage.height();
-  const surface = Skia.Surface.Make(width, height);
-  if (!surface) {
-    sourceImage.dispose();
-    data.dispose();
-    throw new Error(`Unable to create a ${width}×${height} processing surface.`);
-  }
-
-  const imageShader = sourceImage.makeShaderOptions(
-    TileMode.Clamp,
-    TileMode.Clamp,
-    FilterMode.Linear,
-    MipmapMode.None,
-  );
-  const shader = shaderEffect.makeShaderWithChildren(
-    [width, height, settings.profile, grain, halation, seed],
-    [imageShader],
-  );
-  const paint = Skia.Paint();
-  paint.setShader(shader);
-  const canvas = surface.getCanvas();
-
+  let data: SkData | undefined;
+  let sourceImage: SkImage | null = null;
+  let surface: SkSurface | null = null;
+  let imageShader: SkShader | undefined;
+  let shader: SkShader | undefined;
+  let paint: SkPaint | undefined;
+  let snapshot: SkImage | undefined;
   let outputFile: File | undefined;
-  let outputImage: ReturnType<typeof surface.makeImageSnapshot> | undefined;
 
   try {
+    const sourceFile = new File(toFileUri(pathOrUri));
+    if (!sourceFile.exists) {
+      throw new Error('The captured photo file does not exist.');
+    }
+
+    const base64Data = await sourceFile.base64();
+    data = Skia.Data.fromBase64(base64Data);
+    sourceImage = Skia.Image.MakeImageFromEncoded(data);
+    if (!sourceImage) {
+      throw new Error('Unable to decode the captured photo. Invalid image buffer.');
+    }
+
+    const width = sourceImage.width();
+    const height = sourceImage.height();
+    surface = Skia.Surface.Make(width, height);
+    if (!surface) {
+      throw new Error('Failed to create Skia processing surface.');
+    }
+
+    imageShader = sourceImage.makeShaderOptions(
+      TileMode.Clamp,
+      TileMode.Clamp,
+      FilterMode.Linear,
+      MipmapMode.None,
+    );
+    shader = createFilmRuntimeEffect().makeShaderWithChildren(
+      [width, height, settings.profile, grain, halation, seed],
+      [imageShader],
+    );
+    paint = Skia.Paint();
+    paint.setShader(shader);
+
+    const canvas = surface.getCanvas();
     canvas.drawRect(Skia.XYWHRect(0, 0, width, height), paint);
-    outputImage = surface.makeImageSnapshot();
-    const base64 = outputImage.encodeToBase64(ImageFormat.JPEG, 95);
-    if (!base64) {
-      throw new Error('Unable to encode the developed photo as JPEG.');
+    surface.flush();
+
+    snapshot = surface.makeImageSnapshot();
+    const encodedBase64 = snapshot.encodeToBase64(ImageFormat.JPEG, 95);
+    if (!encodedBase64) {
+      throw new Error('Failed to encode developed film frame.');
     }
 
     outputFile = new File(Paths.cache, `realor-${Date.now()}.jpg`);
     outputFile.create({ intermediates: true });
-    await outputFile.write(base64, { encoding: 'base64' });
+    await outputFile.write(encodedBase64, { encoding: 'base64' });
 
     const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
     if (!permission.granted) {
       throw new Error('Photo library permission is required to save this photo.');
     }
 
-    await MediaLibrary.Asset.create(outputFile.uri);
+    const asset = await MediaLibrary.Asset.create(outputFile.uri);
+    return await asset.getUri();
   } finally {
-    outputImage?.dispose();
-    paint.dispose();
-    shader.dispose();
-    imageShader.dispose();
-    surface.dispose();
-    sourceImage.dispose();
-    data.dispose();
+    snapshot?.dispose();
+    paint?.dispose();
+    shader?.dispose();
+    imageShader?.dispose();
+    surface?.dispose();
+    sourceImage?.dispose();
+    data?.dispose();
     if (outputFile?.exists) {
       outputFile.delete();
     }

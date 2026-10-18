@@ -2,13 +2,25 @@ import React, { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import {
-  Camera,
   useCameraDevice,
   useCameraPermission,
   usePhotoOutput,
 } from 'react-native-vision-camera';
+import {
+  SkiaCamera,
+  type SkiaCameraProps,
+} from 'react-native-vision-camera-skia';
+import {
+  FilterMode,
+  MipmapMode,
+  Skia,
+  TileMode,
+} from '@shopify/react-native-skia';
 import { developPhoto } from './src/utils/developPhoto';
-import type { FilmProfile } from './src/shaders/filmShader';
+import {
+  createFilmRuntimeEffect,
+  type FilmProfile,
+} from './src/shaders/filmShader';
 
 const filmProfiles: { label: string; value: FilmProfile }[] = [
   { label: 'KODAK 400', value: 0 },
@@ -25,6 +37,7 @@ export default function RealOrCamera() {
       ? 'speed'
       : 'balanced',
   });
+  const filmEffect = React.useMemo(() => createFilmRuntimeEffect(), []);
   const [isCapturing, setIsCapturing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -32,6 +45,49 @@ export default function RealOrCamera() {
   const [grainEnabled, setGrainEnabled] = useState(true);
   const [halationEnabled, setHalationEnabled] = useState(true);
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const renderFilmFrame = React.useCallback<SkiaCameraProps['onFrame']>(
+    (frame, render) => {
+      'worklet';
+
+      try {
+        render(({ canvas, frameTexture }) => {
+          const width = frameTexture.width();
+          const height = frameTexture.height();
+          const imageShader = frameTexture.makeShaderOptions(
+            TileMode.Clamp,
+            TileMode.Clamp,
+            FilterMode.Linear,
+            MipmapMode.None,
+          );
+          const shader = filmEffect.makeShaderWithChildren(
+            [
+              width,
+              height,
+              filmProfile,
+              grainEnabled ? 0.35 : 0,
+              halationEnabled ? 0.65 : 0,
+              17,
+            ],
+            [imageShader],
+          );
+          const paint = Skia.Paint();
+
+          try {
+            paint.setShader(shader);
+            canvas.drawImage(frameTexture, 0, 0, paint);
+          } finally {
+            paint.dispose();
+            shader.dispose();
+            imageShader.dispose();
+          }
+        });
+      } finally {
+        frame.dispose();
+      }
+    },
+    [filmEffect, filmProfile, grainEnabled, halationEnabled],
+  );
 
   useEffect(
     () => () => {
@@ -112,12 +168,14 @@ export default function RealOrCamera() {
   return (
     <View style={styles.container}>
       <StatusBar style="light" />
-      <Camera
+      <SkiaCamera
         style={StyleSheet.absoluteFill}
         device={device}
         isActive
         outputs={[photoOutput]}
         constraints={[{ photoHDR: false }]}
+        enablePreviewSizedOutputBuffers
+        onFrame={renderFilmFrame}
         onError={(error) => setErrorMessage(error.message)}
       />
       <View style={styles.controls}>
