@@ -1,0 +1,58 @@
+name: Build unsigned iOS app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Generate iOS project
+        run: npx expo prebuild --platform ios
+
+      - name: Archive unsigned iOS app
+        run: |
+          xcodebuild \
+            -workspace ios/RealOr.xcworkspace \
+            -scheme RealOr \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/RealOr.xcarchive \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package app as IPA
+        run: |
+          mkdir -p ios/build/Release-iphoneos/Payload
+          mv build/RealOr.xcarchive/Products/Applications/RealOr.app \
+            ios/build/Release-iphoneos/Payload/RealOr.app
+          cd ios/build/Release-iphoneos
+          zip -r RealOr.ipa Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: realor-ios-unsigned-ipa
+          path: ios/build/Release-iphoneos/RealOr.ipa
+          if-no-files-found: error
+          retention-days: 14
