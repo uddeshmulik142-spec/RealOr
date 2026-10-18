@@ -125,7 +125,8 @@ export default function RealOrCamera() {
         },
         {},
       );
-      await developPhoto(photo.filePath, {
+      await developPhoto({
+        photoPath: photo.filePath,
         profile: filmProfile,
         grain: grainEnabled ? 0.35 : 0,
         halation: halationEnabled ? 0.65 : 0,

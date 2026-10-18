@@ -17,8 +17,15 @@ import {
 } from '@shopify/react-native-skia';
 import {
   createFilmRuntimeEffect,
-  type FilmShaderSettings,
+  type FilmProfile,
 } from '../shaders/filmShader';
+
+interface DevelopOptions {
+  photoPath: string;
+  profile: FilmProfile;
+  grain: number;
+  halation: number;
+}
 
 function clampIntensity(value: number, name: string) {
   if (!Number.isFinite(value)) {
@@ -41,16 +48,15 @@ function toFileUri(pathOrUri: string) {
 }
 
 export async function developPhoto(
-  pathOrUri: string,
-  settings: FilmShaderSettings,
+  { photoPath, profile, grain: grainSetting, halation: halationSetting }: DevelopOptions,
 ): Promise<string> {
-  if (![0, 1, 2].includes(settings.profile)) {
+  if (![0, 1, 2].includes(profile)) {
     throw new RangeError('Film profile must be 0, 1, or 2.');
   }
 
-  const grain = clampIntensity(settings.grain, 'Grain');
-  const halation = clampIntensity(settings.halation, 'Halation');
-  const seed = settings.seed ?? Math.random() * 1000;
+  const grain = clampIntensity(grainSetting, 'Grain');
+  const halation = clampIntensity(halationSetting, 'Halation');
+  const seed = Math.random() * 100;
   if (!Number.isFinite(seed)) {
     throw new RangeError('Shader seed must be a finite number.');
   }
@@ -65,12 +71,16 @@ export async function developPhoto(
   let outputFile: File | undefined;
 
   try {
-    const sourceFile = new File(toFileUri(pathOrUri));
+    const sourceFile = new File(toFileUri(photoPath));
     if (!sourceFile.exists) {
       throw new Error('The captured photo file does not exist.');
     }
 
     const base64Data = await sourceFile.base64();
+    if (!base64Data) {
+      throw new Error('Captured photo file was empty.');
+    }
+
     data = Skia.Data.fromBase64(base64Data);
     sourceImage = Skia.Image.MakeImageFromEncoded(data);
     if (!sourceImage) {
@@ -91,7 +101,7 @@ export async function developPhoto(
       MipmapMode.None,
     );
     shader = createFilmRuntimeEffect().makeShaderWithChildren(
-      [width, height, settings.profile, grain, halation, seed],
+      [width, height, profile, grain, halation, seed],
       [imageShader],
     );
     paint = Skia.Paint();
