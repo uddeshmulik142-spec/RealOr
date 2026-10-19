@@ -39,20 +39,22 @@ jobs:
             -archivePath build/RealOr.xcarchive \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
             archive
 
       - name: Package app as IPA
         run: |
-          mkdir -p ios/build/Release-iphoneos/Payload
-          mv build/RealOr.xcarchive/Products/Applications/RealOr.app \
-            ios/build/Release-iphoneos/Payload/RealOr.app
-          cd ios/build/Release-iphoneos
+          mkdir -p build/ipa/Payload
+          ditto build/RealOr.xcarchive/Products/Applications/RealOr.app \
+            build/ipa/Payload/RealOr.app
+          cd build/ipa
           zip -r RealOr.ipa Payload
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: realor-ios-unsigned-ipa
-          path: ios/build/Release-iphoneos/RealOr.ipa
+          path: build/ipa/RealOr.ipa
           if-no-files-found: error
           retention-days: 14

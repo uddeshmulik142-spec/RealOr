@@ -11,8 +11,10 @@
       "infoPlist": {
         "NSCameraUsageDescription": "RealOr uses the camera to capture photos for analysis.",
         "NSPhotoLibraryAddUsageDescription": "RealOr saves developed photos to your camera roll.",
-        "NSPhotoLibraryUsageDescription": "RealOr needs photo library access to save developed photos."
-      }
+        "NSPhotoLibraryUsageDescription": "RealOr needs photo library access to save developed photos.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.uddeshmulik.RealOr"
     },
     "android": {
       "permissions": [
