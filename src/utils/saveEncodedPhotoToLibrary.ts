@@ -1,7 +1,7 @@
 import { File, Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 
-export async function saveEncodedPhotoToLibrary(base64Data: string): Promise<void> {
+export async function saveEncodedPhotoToLibrary(base64Data: string): Promise<string> {
   if (!base64Data) {
     throw new Error('Processed photo data is empty.');
   }
@@ -17,7 +17,8 @@ export async function saveEncodedPhotoToLibrary(base64Data: string): Promise<voi
       throw new Error('Photo library permission is required to save this photo.');
     }
 
-    await MediaLibrary.Asset.create(outputFile.uri);
+    const asset = await MediaLibrary.Asset.create(outputFile.uri);
+    return await asset.getUri();
   } finally {
     if (outputFile?.exists) {
       outputFile.delete();

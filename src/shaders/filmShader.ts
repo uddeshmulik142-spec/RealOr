@@ -6,6 +6,7 @@ export interface FilmShaderSettings {
   profile: FilmProfile;
   grain: number;
   halation: number;
+  vignette: number;
   seed?: number;
 }
 
@@ -15,6 +16,7 @@ uniform float2 u_resolution;
 uniform float u_profile;
 uniform float u_grain;
 uniform float u_halation;
+uniform float u_vignette;
 uniform float u_seed;
 
 float3 sampleLinear(float2 position) {
@@ -107,6 +109,10 @@ half4 main(float2 position) {
   float grainScale = max(1.0, resolutionScale * 1.25);
   float grain = (randomNoise(position / grainScale) - 0.5) * 2.0;
   srgb += grain * u_grain * midtoneWeight * 0.085;
+
+  float2 uv = position / resolution;
+  float vignette = 1.0 - pow(distance(uv, float2(0.5, 0.5)), 2.0) * u_vignette;
+  srgb *= clamp(vignette, 0.0, 1.0);
 
   return half4(clamp(srgb, 0.0, 1.0), centerSample.a);
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import * as Haptics from 'expo-haptics';
 import {
   useCameraDevice,
   useCameraPermission,
@@ -22,6 +23,7 @@ import {
 } from '@shopify/react-native-skia';
 import { createSynchronizable, scheduleOnRN } from 'react-native-worklets';
 import { saveEncodedPhotoToLibrary } from './src/utils/saveEncodedPhotoToLibrary';
+import { getLatestPhotoUri } from './src/utils/getLatestPhotoUri';
 import {
   createFilmRuntimeEffect,
   type FilmProfile,
@@ -64,11 +66,14 @@ export default function RealOrCamera() {
   const [filmProfile, setFilmProfile] = useState<FilmProfile>(0);
   const [grainEnabled, setGrainEnabled] = useState(true);
   const [halationEnabled, setHalationEnabled] = useState(true);
+  const [vignetteEnabled, setVignetteEnabled] = useState(true);
+  const [latestPhotoUri, setLatestPhotoUri] = useState<string | null>(null);
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const saveProcessedPhoto = React.useCallback(async (base64Data: string) => {
     try {
-      await saveEncodedPhotoToLibrary(base64Data);
+      const savedPhotoUri = await saveEncodedPhotoToLibrary(base64Data);
+      setLatestPhotoUri(savedPhotoUri);
       setStatusMessage('Saved to camera roll');
       statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
     } catch (error: unknown) {
@@ -111,6 +116,7 @@ export default function RealOrCamera() {
               filmProfile,
               grainEnabled ? 0.35 : 0,
               halationEnabled ? 0.65 : 0,
+              vignetteEnabled ? 0.9 : 0,
               17,
             ];
             screenShader = filmEffect.makeShaderWithChildren(
@@ -143,6 +149,7 @@ export default function RealOrCamera() {
                   filmProfile,
                   grainEnabled ? 0.35 : 0,
                   halationEnabled ? 0.65 : 0,
+                  vignetteEnabled ? 0.9 : 0,
                   17,
                 ];
 
@@ -238,6 +245,7 @@ export default function RealOrCamera() {
       filmProfile,
       grainEnabled,
       halationEnabled,
+      vignetteEnabled,
       saveProcessedPhoto,
     ],
   );
@@ -261,9 +269,37 @@ export default function RealOrCamera() {
     }
   }, [canRequestPermission, hasPermission, requestPermission]);
 
+  useEffect(() => {
+    if (!hasPermission) return undefined;
+
+    let isMounted = true;
+    void getLatestPhotoUri()
+      .then((uri) => {
+        if (isMounted && uri) setLatestPhotoUri(uri);
+      })
+      .catch((error: unknown) => {
+        if (isMounted) {
+          setErrorMessage(
+            error instanceof Error
+              ? error.message
+              : 'Unable to load the latest camera-roll photo.',
+          );
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [hasPermission]);
+
   const takePhoto = async () => {
     if (!device || !hasPermission || isCapturing) return;
 
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+      (error: unknown) => {
+        console.warn('Unable to play shutter haptic feedback.', error);
+      },
+    );
     if (statusTimeout.current) clearTimeout(statusTimeout.current);
     setIsCapturing(true);
     setErrorMessage(null);
@@ -359,6 +395,19 @@ export default function RealOrCamera() {
           >
             <Text style={styles.effectText}>Grain {grainEnabled ? 'On' : 'Off'}</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityState={{ checked: vignetteEnabled }}
+            onPress={() => setVignetteEnabled((enabled) => !enabled)}
+            style={[
+              styles.effectButton,
+              vignetteEnabled && styles.effectButtonSelected,
+            ]}
+          >
+            <Text style={styles.effectText}>
+              Vignette {vignetteEnabled ? 'On' : 'Off'}
+            </Text>
+          </TouchableOpacity>
         </View>
         <TouchableOpacity
           accessibilityLabel="Take photo"
@@ -367,6 +416,23 @@ export default function RealOrCamera() {
           onPress={() => void takePhoto()}
           style={[styles.shutterButton, isCapturing && styles.shutterDisabled]}
         />
+      </View>
+      <View
+        style={styles.galleryThumbnail}
+        accessibilityLabel={
+          latestPhotoUri ? 'Most recent camera-roll photo' : 'Camera roll is empty'
+        }
+        accessibilityRole="image"
+      >
+        {latestPhotoUri ? (
+          <Image
+            source={{ uri: latestPhotoUri }}
+            resizeMode="cover"
+            style={styles.galleryImage}
+          />
+        ) : (
+          <Text style={styles.galleryPlaceholder}>PHOTO</Text>
+        )}
       </View>
     </View>
   );
@@ -395,6 +461,29 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
     paddingHorizontal: 12,
+  },
+  galleryThumbnail: {
+    position: 'absolute',
+    left: 18,
+    bottom: 48,
+    width: 58,
+    height: 58,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#fff',
+    backgroundColor: '#222',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  galleryImage: {
+    width: '100%',
+    height: '100%',
+  },
+  galleryPlaceholder: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '700',
   },
   status: {
     color: '#fff',
