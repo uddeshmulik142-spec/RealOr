@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSharedValue, withTiming } from 'react-native-reanimated';
 import {
   Image,
+  Modal,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -43,6 +44,11 @@ const filmProfiles: { label: string; value: FilmProfile }[] = [
   { label: 'LEICA M', value: 2 },
 ];
 const exposureStops = [-2, -1, 0, 1, 2] as const;
+type CapturedPhotoDetails = {
+  filmStock: string;
+  capturedAt: Date;
+  exposure: number;
+};
 
 function getNeutralZoomFactor(device: CameraDevice | undefined): number {
   if (!device || !('neutralZoomFactor' in device)) return 1;
@@ -61,7 +67,11 @@ function clampZoom(zoom: number, device: CameraDevice): number {
 
 export default function RealOrCamera() {
   const [lens, setLens] = useState<'0.5x' | '1x' | '2x' | '5x'>('1x');
-  const device = useCameraDevice('back');
+  const multiLensDevice = useCameraDevice('back', {
+    physicalDevices: ['ultra-wide-angle', 'wide-angle', 'telephoto'],
+  });
+  const defaultBackDevice = useCameraDevice('back');
+  const device = multiLensDevice ?? defaultBackDevice;
   const [zoom, setZoom] = useState(() => getNeutralZoomFactor(device));
   const animatedZoom = useSharedValue(zoom);
   const [exposure, setExposure] = useState<number>(0);
@@ -99,6 +109,11 @@ export default function RealOrCamera() {
   const [halationEnabled, setHalationEnabled] = useState(true);
   const [vignetteEnabled, setVignetteEnabled] = useState(true);
   const [latestPhotoUri, setLatestPhotoUri] = useState<string | null>(null);
+  const [photoModalVisible, setPhotoModalVisible] = useState(false);
+  const [latestPhotoDetails, setLatestPhotoDetails] =
+    useState<CapturedPhotoDetails | null>(null);
+  const [photosTaken, setPhotosTaken] = useState(0);
+  const captureDetails = useRef({ filmProfile, exposure });
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const minExposure = device ? Math.max(-2, device.minExposureBias) : -2;
   const maxExposure = device ? Math.min(2, device.maxExposureBias) : 2;
@@ -108,7 +123,7 @@ export default function RealOrCamera() {
   );
   const neutralZoom = getNeutralZoomFactor(device);
   const zoomFactors = {
-    '0.5x': device ? clampZoom(device.minZoom, device) : 0.5 * neutralZoom,
+    '0.5x': device ? device.minZoom : 0.5 * neutralZoom,
     '1x': device ? clampZoom(neutralZoom, device) : neutralZoom,
     '2x': device ? clampZoom(neutralZoom * 2, device) : neutralZoom * 2,
     '5x': device ? clampZoom(neutralZoom * 5, device) : neutralZoom * 5,
@@ -127,6 +142,15 @@ export default function RealOrCamera() {
     try {
       const savedPhotoUri = await saveEncodedPhotoToLibrary(base64Data);
       setLatestPhotoUri(savedPhotoUri);
+      const capturedDetails = captureDetails.current;
+      setLatestPhotoDetails({
+        filmStock:
+          filmProfiles.find((profile) => profile.value === capturedDetails.filmProfile)
+            ?.label ?? 'UNKNOWN FILM',
+        capturedAt: new Date(),
+        exposure: capturedDetails.exposure,
+      });
+      setPhotosTaken((count) => count + 1);
       setStatusMessage('Saved to camera roll');
       statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
     } catch (error: unknown) {
@@ -348,6 +372,7 @@ export default function RealOrCamera() {
   const takePhoto = async () => {
     if (!device || !hasPermission || isCapturing) return;
 
+    captureDetails.current = { filmProfile, exposure: boundedExposure };
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
       (error: unknown) => {
         console.warn('Unable to play shutter haptic feedback.', error);
@@ -377,8 +402,21 @@ export default function RealOrCamera() {
     setExposure(Math.min(maxExposure, Math.max(minExposure, value)));
   };
   const selectLens = (lensOption: typeof lens) => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play lens selection haptic feedback.', error);
+    });
     setLens(lensOption);
-    setZoom(zoomFactors[lensOption]);
+    setZoom(
+      lensOption === '0.5x' && device
+        ? device.minZoom
+        : zoomFactors[lensOption],
+    );
+  };
+  const selectFilmProfile = (profile: FilmProfile) => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play film selection haptic feedback.', error);
+    });
+    setFilmProfile(profile);
   };
   const selectedExposureStop = exposureStops.reduce((nearest, stop) =>
     Math.abs(stop - boundedExposure) < Math.abs(nearest - boundedExposure)
@@ -443,66 +481,105 @@ export default function RealOrCamera() {
       }}
     >
       <StatusBar style="light" />
-      <SkiaCamera
-        style={StyleSheet.absoluteFill}
-        device={device}
-        isActive
-        zoom={animatedZoom}
-        exposure={boundedExposure}
-        constraints={[{ photoHDR: false }]}
-        targetResolution={targetResolution}
-        onFrame={renderFilmFrame}
-        onError={(error) => setErrorMessage(error.message)}
-      />
-      <View
-        style={styles.exposureIndicator}
-        accessibilityLabel={`Exposure ${boundedExposure >= 0 ? '+' : ''}${boundedExposure.toFixed(1)} EV`}
-      >
-        <View style={styles.exposureHeader}>
-          <Text style={styles.exposureValue}>
+      <View style={styles.topPlate}>
+        <View style={styles.brandMark}>
+          <View style={styles.brandDot} />
+          <Text style={styles.brandText}>REALOR</Text>
+          <Text style={styles.brandEdition}>RANGEFINDER · 35</Text>
+        </View>
+        <View style={styles.lcdPanel}>
+          <Text style={styles.lcdReadout}>[ {24 - (photosTaken % 24)} EXP ]</Text>
+          <View style={styles.lcdDivider} />
+          <Text style={styles.lcdBadge}>
+            {filmProfiles.find((profile) => profile.value === filmProfile)?.label ??
+              'FILM'}
+          </Text>
+          <View
+            style={styles.batteryBadge}
+            accessibilityLabel="Battery indicator"
+          >
+            <View style={styles.batteryCell} />
+            <View style={styles.batteryCell} />
+            <View style={styles.batteryCell} />
+          </View>
+          <Text style={styles.lcdReadout}>
             EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
           </Text>
-          <TouchableOpacity
-            accessibilityRole="button"
-            accessibilityLabel="Reset exposure to zero"
-            onPress={() => selectExposure(0)}
-            style={styles.exposureReset}
-          >
-            <Text style={styles.exposureResetText}>RESET</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.exposureScale}>
-          {exposureStops.map((stop) => {
-            const isSelected = selectedExposureStop === stop;
-            const label = `${stop > 0 ? '+' : ''}${stop}`;
-            return (
-              <TouchableOpacity
-                key={stop}
-                accessibilityRole="button"
-                accessibilityLabel={`Set exposure to ${label} EV`}
-                accessibilityState={{ selected: isSelected }}
-                onPress={() => selectExposure(stop)}
-                style={styles.exposureTickButton}
-              >
-                <Text
-                  style={[
-                    styles.exposureTickLabel,
-                    isSelected && styles.exposureTickLabelSelected,
-                  ]}
-                >
-                  {label}
-                </Text>
-                <View
-                  style={[
-                    styles.exposureTick,
-                    isSelected && styles.exposureTickSelected,
-                  ]}
-                />
-              </TouchableOpacity>
-            );
-          })}
         </View>
       </View>
+
+      <View style={styles.viewfinderFrame}>
+        <View style={styles.viewfinder}>
+          <SkiaCamera
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive
+            allowHapticsAndSystemSoundsPlayback
+            zoom={animatedZoom}
+            exposure={boundedExposure}
+            constraints={[{ photoHDR: false }]}
+            targetResolution={targetResolution}
+            onFrame={renderFilmFrame}
+            onError={(error) => setErrorMessage(error.message)}
+          />
+          <View pointerEvents="none" style={styles.viewfinderTopLine}>
+            <Text style={styles.viewfinderLabel}>FRAME 01</Text>
+            <View style={styles.liveDot} />
+          </View>
+          <View
+            style={styles.exposureIndicator}
+            accessibilityLabel={`Exposure ${boundedExposure >= 0 ? '+' : ''}${boundedExposure.toFixed(1)} EV`}
+          >
+            <Text style={styles.exposureValue}>
+              EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
+            </Text>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Reset exposure to zero"
+              onPress={() => selectExposure(0)}
+              style={styles.exposureReset}
+            >
+              <Text style={styles.exposureResetText}>RESET</Text>
+            </TouchableOpacity>
+            <View style={styles.exposureScale}>
+              {exposureStops.map((stop) => {
+                const isSelected = selectedExposureStop === stop;
+                const label = `${stop > 0 ? '+' : ''}${stop}`;
+                return (
+                  <TouchableOpacity
+                    key={stop}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Set exposure to ${label} EV`}
+                    accessibilityState={{ selected: isSelected }}
+                    onPress={() => selectExposure(stop)}
+                    style={styles.exposureTickButton}
+                  >
+                    <Text
+                      style={[
+                        styles.exposureTickLabel,
+                        isSelected && styles.exposureTickLabelSelected,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                    <View
+                      style={[
+                        styles.exposureTick,
+                        isSelected && styles.exposureTickSelected,
+                      ]}
+                    />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+          <View pointerEvents="none" style={styles.viewfinderBottomLine}>
+            <Text style={styles.viewfinderLabel}>AF · AE LOCK</Text>
+            <Text style={styles.viewfinderLabel}>{lens}</Text>
+          </View>
+        </View>
+      </View>
+
       <View style={styles.controls}>
         {errorMessage ? (
           <Text style={styles.error} accessibilityRole="alert">
@@ -514,13 +591,15 @@ export default function RealOrCamera() {
             {statusMessage}
           </Text>
         ) : null}
-        <View style={styles.filmOptions}>
+        <View style={styles.controlSection}>
+          <Text style={styles.sectionLabel}>FILM STOCK</Text>
+          <View style={styles.filmOptions}>
           {filmProfiles.map((profile) => (
             <TouchableOpacity
               key={profile.value}
               accessibilityRole="button"
               accessibilityState={{ selected: filmProfile === profile.value }}
-              onPress={() => setFilmProfile(profile.value)}
+              onPress={() => selectFilmProfile(profile.value)}
               style={[
                 styles.optionButton,
                 filmProfile === profile.value && styles.optionButtonSelected,
@@ -536,6 +615,7 @@ export default function RealOrCamera() {
               </Text>
             </TouchableOpacity>
           ))}
+          </View>
         </View>
         <View style={styles.effectOptions}>
           <TouchableOpacity
@@ -570,55 +650,118 @@ export default function RealOrCamera() {
             </Text>
           </TouchableOpacity>
         </View>
-        <View style={styles.lensSelector}>
-          {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => (
-            <TouchableOpacity
-              key={lensOption}
-              accessibilityRole="button"
-              accessibilityLabel={`Select ${lensOption} lens`}
-              accessibilityState={{ selected: lens === lensOption }}
-              onPress={() => selectLens(lensOption)}
-              style={[
-                styles.lensButton,
-                lens === lensOption && styles.lensButtonSelected,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.lensText,
-                  lens === lensOption && styles.lensTextSelected,
-                ]}
-              >
-                {lensOption}
-              </Text>
-            </TouchableOpacity>
-          ))}
+        <View style={styles.bottomDeck}>
+          <TouchableOpacity
+            accessibilityLabel={
+              latestPhotoUri ? 'Open latest photo' : 'No recent photo'
+            }
+            accessibilityRole="button"
+            disabled={!latestPhotoUri}
+            onPress={() => setPhotoModalVisible(true)}
+            style={styles.galleryThumbnail}
+          >
+            {latestPhotoUri ? (
+              <Image
+                source={{ uri: latestPhotoUri }}
+                resizeMode="cover"
+                style={styles.galleryImage}
+              />
+            ) : (
+              <Text style={styles.galleryPlaceholder}>ROLL</Text>
+            )}
+          </TouchableOpacity>
+          <View style={styles.lensCluster}>
+            <Text style={styles.sectionLabel}>FOCAL LENGTH</Text>
+            <View style={styles.lensSelector}>
+              {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => (
+                <TouchableOpacity
+                  key={lensOption}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Select ${lensOption} lens`}
+                  accessibilityState={{ selected: lens === lensOption }}
+                  onPress={() => selectLens(lensOption)}
+                  style={[
+                    styles.lensButton,
+                    lens === lensOption && styles.lensButtonSelected,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.lensText,
+                      lens === lensOption && styles.lensTextSelected,
+                    ]}
+                  >
+                    {lensOption}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+          <View style={styles.deckSpacer} />
         </View>
+      </View>
+      <View style={styles.shutterDeck}>
+        <Text style={styles.meterLabel}>BULB</Text>
         <TouchableOpacity
           accessibilityLabel="Take photo"
           accessibilityRole="button"
           disabled={isCapturing}
           onPress={() => void takePhoto()}
           style={[styles.shutterButton, isCapturing && styles.shutterDisabled]}
-        />
+        >
+          <View style={styles.shutterCore} />
+        </TouchableOpacity>
+        <Text style={styles.meterLabel}>AUTO</Text>
       </View>
-      <View
-        style={styles.galleryThumbnail}
-        accessibilityLabel={
-          latestPhotoUri ? 'Most recent camera-roll photo' : 'Camera roll is empty'
-        }
-        accessibilityRole="image"
+      <Modal
+        visible={photoModalVisible}
+        animationType="fade"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setPhotoModalVisible(false)}
       >
-        {latestPhotoUri ? (
-          <Image
-            source={{ uri: latestPhotoUri }}
-            resizeMode="cover"
-            style={styles.galleryImage}
-          />
-        ) : (
-          <Text style={styles.galleryPlaceholder}>PHOTO</Text>
-        )}
-      </View>
+        <View style={styles.photoModal}>
+          <StatusBar style="light" />
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={styles.modalEyebrow}>REALOR · DEVELOPED FRAME</Text>
+              <Text style={styles.modalTitle}>Latest photograph</Text>
+            </View>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Close photo preview"
+              onPress={() => setPhotoModalVisible(false)}
+              style={styles.modalCloseButton}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+          {latestPhotoUri ? (
+            <Image
+              source={{ uri: latestPhotoUri }}
+              resizeMode="contain"
+              style={styles.modalImage}
+            />
+          ) : null}
+          <View style={styles.photoDetails}>
+            <Text style={styles.detailLabel}>FILM STOCK</Text>
+            <Text style={styles.detailValue}>
+              {latestPhotoDetails?.filmStock ?? 'Details unavailable'}
+            </Text>
+            <Text style={styles.detailLabel}>CAPTURED</Text>
+            <Text style={styles.detailValue}>
+              {latestPhotoDetails
+                ? latestPhotoDetails.capturedAt.toLocaleString()
+                : 'Original capture date'}
+            </Text>
+            <Text style={styles.detailLabel}>EXPOSURE BIAS</Text>
+            <Text style={styles.detailValue}>
+              {latestPhotoDetails
+                ? `EV ${latestPhotoDetails.exposure >= 0 ? '+' : ''}${latestPhotoDetails.exposure.toFixed(1)}`
+                : 'Details unavailable'}
+            </Text>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -626,219 +769,498 @@ export default function RealOrCamera() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#121212',
+    paddingTop: 8,
   },
   messageContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#121212',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
   },
   message: {
-    color: '#fff',
+    color: '#e5e5ea',
     fontSize: 16,
     textAlign: 'center',
   },
-  controls: {
-    position: 'absolute',
-    bottom: 28,
-    width: '100%',
+  topPlate: {
+    minHeight: 76,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
+    justifyContent: 'space-between',
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#050505',
+    backgroundColor: '#1c1c1e',
   },
-  galleryThumbnail: {
-    position: 'absolute',
-    left: 18,
-    bottom: 48,
-    width: 58,
-    height: 58,
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: '#fff',
-    backgroundColor: '#222',
+  brandMark: {
+    alignItems: 'flex-start',
+  },
+  brandDot: {
+    width: 7,
+    height: 7,
+    marginBottom: 4,
+    borderRadius: 4,
+    backgroundColor: '#d32f2f',
+  },
+  brandText: {
+    color: '#e5e5ea',
+    fontSize: 17,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  brandEdition: {
+    marginTop: 3,
+    color: '#8e8e93',
+    fontSize: 7,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  lcdPanel: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#373737',
+    borderRadius: 5,
+    backgroundColor: '#10100d',
+  },
+  lcdReadout: {
+    color: '#ff9500',
+    fontSize: 10,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.5,
+  },
+  lcdDivider: {
+    width: 1,
+    height: 18,
+    backgroundColor: '#54401f',
+  },
+  lcdBadge: {
+    maxWidth: 90,
+    color: '#ffbf58',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  batteryBadge: {
+    width: 19,
+    height: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 2,
+    borderWidth: 1,
+    borderColor: '#ff9500',
+    borderRadius: 2,
+  },
+  batteryCell: {
+    flex: 1,
+    height: 5,
+    backgroundColor: '#ff9500',
+  },
+  viewfinderFrame: {
+    flex: 1,
+    width: '100%',
+    maxHeight: '58%',
+    aspectRatio: 0.75,
+    alignSelf: 'center',
+    padding: 8,
+    borderTopWidth: 2,
+    borderTopColor: '#414143',
+    borderBottomWidth: 3,
+    borderBottomColor: '#050505',
+    backgroundColor: '#090909',
+  },
+  viewfinder: {
+    flex: 1,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#555557',
+    backgroundColor: '#050505',
+  },
+  viewfinderTopLine: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 30,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#090909bb',
+  },
+  viewfinderBottomLine: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 30,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#090909bb',
+  },
+  viewfinderLabel: {
+    color: '#e5e5ea',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#d32f2f',
+  },
+  controls: {
+    width: '100%',
+    paddingHorizontal: 18,
+    paddingTop: 8,
+    paddingBottom: 4,
+    backgroundColor: '#1c1c1e',
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+  },
+  controlSection: {
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  sectionLabel: {
+    marginBottom: 6,
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
   galleryImage: {
     width: '100%',
     height: '100%',
   },
   galleryPlaceholder: {
-    color: '#fff',
-    fontSize: 9,
-    fontWeight: '700',
+    color: '#ff9500',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
   status: {
-    color: '#fff',
-    marginBottom: 12,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  filmOptions: {
-    width: '100%',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  optionButton: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#ffffff88',
-    backgroundColor: '#00000088',
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    marginHorizontal: 3,
-  },
-  optionButtonSelected: {
-    borderColor: '#fff',
-    backgroundColor: '#fff',
-  },
-  optionText: {
-    color: '#fff',
+    color: '#ffbf58',
+    marginBottom: 6,
     fontSize: 11,
     fontWeight: '700',
+    textAlign: 'center',
+  },
+  filmOptions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    padding: 4,
+    borderWidth: 1,
+    borderColor: '#454547',
+    borderRadius: 9,
+    backgroundColor: '#111112',
+  },
+  optionButton: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#454547',
+    backgroundColor: '#252527',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    marginHorizontal: 2,
+  },
+  optionButtonSelected: {
+    borderColor: '#e5e5ea',
+    backgroundColor: '#d4d4d6',
+  },
+  optionText: {
+    color: '#c7c7cc',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   optionTextSelected: {
-    color: '#111',
+    color: '#171719',
   },
   effectOptions: {
     flexDirection: 'row',
-    marginBottom: 18,
+    justifyContent: 'center',
+    marginBottom: 8,
   },
   effectButton: {
-    borderRadius: 14,
+    borderRadius: 5,
     borderWidth: 1,
-    borderColor: '#ffffff88',
-    backgroundColor: '#00000088',
-    paddingVertical: 7,
-    paddingHorizontal: 14,
-    marginHorizontal: 5,
+    borderColor: '#454547',
+    backgroundColor: '#202022',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginHorizontal: 3,
   },
   effectButtonSelected: {
-    borderColor: '#e53935',
+    borderColor: '#d32f2f',
   },
   effectText: {
-    color: '#fff',
-    fontSize: 12,
+    color: '#e5e5ea',
+    fontSize: 9,
     fontWeight: '600',
   },
   lensSelector: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    borderRadius: 24,
+    justifyContent: 'center',
+    gap: 5,
+    padding: 4,
     borderWidth: 1,
-    borderColor: '#ffffff55',
-    backgroundColor: '#00000099',
-    padding: 5,
-    marginBottom: 16,
+    borderColor: '#454547',
+    borderRadius: 20,
+    backgroundColor: '#111112',
   },
   lensButton: {
-    minWidth: 54,
+    minWidth: 48,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 20,
-    paddingVertical: 9,
-    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderTopColor: '#555557',
+    borderLeftColor: '#454547',
+    borderRightColor: '#222224',
+    borderBottomColor: '#222224',
+    backgroundColor: '#303033',
   },
   lensButtonSelected: {
-    backgroundColor: '#fff',
+    borderColor: '#ff9500',
+    backgroundColor: '#3a2b15',
   },
   lensText: {
-    color: '#fff',
-    fontSize: 13,
+    color: '#e5e5ea',
+    fontSize: 11,
     fontWeight: '700',
   },
   lensTextSelected: {
-    color: '#111',
+    color: '#ffbf58',
   },
   exposureIndicator: {
     position: 'absolute',
-    right: 18,
-    top: '42%',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 18,
-    backgroundColor: '#00000088',
-  },
-  exposureHeader: {
-    flexDirection: 'row',
+    right: 8,
+    top: '34%',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    paddingVertical: 8,
+    paddingHorizontal: 7,
+    borderWidth: 1,
+    borderColor: '#ffffff33',
+    borderRadius: 8,
+    backgroundColor: '#111111d9',
   },
   exposureValue: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
+    color: '#ff9500',
+    fontSize: 10,
+    fontWeight: '800',
     fontVariant: ['tabular-nums'],
   },
   exposureReset: {
-    marginTop: 7,
-    paddingVertical: 5,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-    backgroundColor: '#ffffff22',
+    marginTop: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 4,
+    backgroundColor: '#ffffff18',
   },
   exposureResetText: {
-    color: '#ffffffcc',
-    fontSize: 8,
+    color: '#c7c7cc',
+    fontSize: 7,
     fontWeight: '800',
     letterSpacing: 0.8,
   },
   exposureScale: {
-    flexDirection: 'row',
-    marginTop: 8,
+    marginTop: 5,
     alignItems: 'center',
-    justifyContent: 'space-between',
   },
   exposureTickButton: {
-    minWidth: 30,
-    height: 32,
-    flexDirection: 'column',
+    width: 44,
+    height: 27,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
+    justifyContent: 'flex-end',
+    gap: 6,
   },
   exposureTickLabel: {
-    color: '#ffffffaa',
-    fontSize: 11,
+    minWidth: 15,
+    color: '#c7c7cc',
+    fontSize: 9,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
-    textAlign: 'center',
+    textAlign: 'right',
   },
   exposureTickLabelSelected: {
-    color: '#fff',
-    fontWeight: '800',
+    color: '#ff9500',
+    fontWeight: '900',
   },
   exposureTick: {
-    width: 14,
+    width: 10,
     height: 1,
-    backgroundColor: '#ffffff99',
+    backgroundColor: '#c7c7cc',
   },
   exposureTickSelected: {
-    width: 20,
+    width: 15,
     height: 2,
-    backgroundColor: '#fff',
+    backgroundColor: '#ff9500',
+  },
+  bottomDeck: {
+    minHeight: 65,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    backgroundColor: '#151516',
+    borderTopWidth: 1,
+    borderTopColor: '#080808',
+  },
+  galleryThumbnail: {
+    width: 48,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderRadius: 5,
+    borderWidth: 2,
+    borderTopColor: '#f1f1f3',
+    borderLeftColor: '#b8b8ba',
+    borderRightColor: '#777779',
+    borderBottomColor: '#777779',
+    backgroundColor: '#28282a',
+  },
+  lensCluster: {
+    alignItems: 'center',
+  },
+  deckSpacer: {
+    width: 48,
+  },
+  shutterDeck: {
+    minHeight: 88,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    backgroundColor: '#1c1c1e',
+  },
+  meterLabel: {
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
   shutterButton: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    borderWidth: 4,
-    borderColor: '#fff',
-    backgroundColor: '#e53935',
+    width: 66,
+    height: 66,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 34,
+    borderWidth: 5,
+    borderTopColor: '#f5f5f7',
+    borderLeftColor: '#d1d1d3',
+    borderRightColor: '#8e8e93',
+    borderBottomColor: '#77777b',
+    backgroundColor: '#b9b9bc',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.55,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  shutterCore: {
+    width: 43,
+    height: 43,
+    borderRadius: 22,
+    borderWidth: 3,
+    borderTopColor: '#8d1d1d',
+    borderLeftColor: '#b82828',
+    borderRightColor: '#631616',
+    borderBottomColor: '#551212',
+    backgroundColor: '#d32f2f',
   },
   shutterDisabled: {
     opacity: 0.5,
   },
+  photoModal: {
+    flex: 1,
+    paddingTop: 50,
+    paddingBottom: 28,
+    paddingHorizontal: 20,
+    backgroundColor: '#121212',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  modalEyebrow: {
+    color: '#ff9500',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+  },
+  modalTitle: {
+    marginTop: 5,
+    color: '#f2f2f7',
+    fontSize: 21,
+    fontWeight: '700',
+  },
+  modalCloseButton: {
+    paddingVertical: 9,
+    paddingHorizontal: 13,
+    borderWidth: 1,
+    borderColor: '#6b6b6f',
+    borderRadius: 7,
+    backgroundColor: '#252527',
+  },
+  modalCloseText: {
+    color: '#e5e5ea',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  modalImage: {
+    flex: 1,
+    width: '100%',
+    minHeight: 220,
+    borderRadius: 8,
+    backgroundColor: '#090909',
+  },
+  photoDetails: {
+    marginTop: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#3c3c3e',
+    borderRadius: 8,
+    backgroundColor: '#1c1c1e',
+  },
+  detailLabel: {
+    marginTop: 8,
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  detailValue: {
+    marginTop: 3,
+    color: '#e5e5ea',
+    fontSize: 13,
+    fontWeight: '600',
+  },
   error: {
-    color: '#fff',
-    backgroundColor: '#b00020',
-    padding: 10,
-    marginHorizontal: 20,
-    marginBottom: 16,
+    color: '#f2f2f7',
+    backgroundColor: '#9f2020',
+    padding: 8,
+    marginBottom: 6,
     textAlign: 'center',
+    fontSize: 11,
   },
 });
