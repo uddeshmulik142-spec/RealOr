@@ -7,16 +7,19 @@ import {
 } from 'react-native-vision-camera';
 import {
   SkiaCamera,
-  type SkiaCameraRef,
   type SkiaCameraProps,
 } from 'react-native-vision-camera-skia';
 import {
   FilterMode,
+  ImageFormat,
   MipmapMode,
   Skia,
   TileMode,
+  type SkImage,
+  type SkSurface,
 } from '@shopify/react-native-skia';
-import { saveSnapshotToLibrary } from './src/utils/saveSnapshotToLibrary';
+import { createSynchronizable, scheduleOnRN } from 'react-native-worklets';
+import { saveEncodedPhotoToLibrary } from './src/utils/saveEncodedPhotoToLibrary';
 import {
   createFilmRuntimeEffect,
   type FilmProfile,
@@ -32,8 +35,27 @@ export default function RealOrCamera() {
   const device = useCameraDevice('back');
   const { hasPermission, canRequestPermission, requestPermission } =
     useCameraPermission();
-  const camera = useRef<SkiaCameraRef>(null);
+  const captureRequested = React.useMemo(
+    () => createSynchronizable(false, { fixedType: true }),
+    [],
+  );
   const filmEffect = React.useMemo(() => createFilmRuntimeEffect(), []);
+  const targetResolution = React.useMemo(() => {
+    const resolutions = device?.getSupportedResolutions('stream') ?? [];
+    return resolutions.reduce<(typeof resolutions)[number] | undefined>(
+      (largest, resolution) => {
+        if (
+          !largest ||
+          resolution.width * resolution.height >
+            largest.width * largest.height
+        ) {
+          return resolution;
+        }
+        return largest;
+      },
+      undefined,
+    );
+  }, [device]);
   const [isCapturing, setIsCapturing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -41,6 +63,27 @@ export default function RealOrCamera() {
   const [grainEnabled, setGrainEnabled] = useState(true);
   const [halationEnabled, setHalationEnabled] = useState(true);
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const saveProcessedPhoto = React.useCallback(async (base64Data: string) => {
+    try {
+      await saveEncodedPhotoToLibrary(base64Data);
+      setStatusMessage('Saved to camera roll');
+      statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
+    } catch (error: unknown) {
+      setStatusMessage(null);
+      setErrorMessage(
+        error instanceof Error ? error.message : 'Unable to save photo.',
+      );
+    } finally {
+      setIsCapturing(false);
+    }
+  }, []);
+
+  const failCapture = React.useCallback((message: string) => {
+    setStatusMessage(null);
+    setErrorMessage(message);
+    setIsCapturing(false);
+  }, []);
 
   const renderFilmFrame = React.useCallback<SkiaCameraProps['onFrame']>(
     (frame, render) => {
@@ -72,6 +115,36 @@ export default function RealOrCamera() {
           try {
             paint.setShader(shader);
             canvas.drawImage(frameTexture, 0, 0, paint);
+
+            if (captureRequested.getBlocking()) {
+              captureRequested.setBlocking(false);
+
+              let surface: SkSurface | null = null;
+              let snapshot: SkImage | undefined;
+              try {
+                surface = Skia.Surface.MakeOffscreen(width, height);
+                if (!surface) {
+                  throw new Error('Unable to create the high-resolution capture surface.');
+                }
+
+                surface.getCanvas().drawImage(frameTexture, 0, 0, paint);
+                snapshot = surface.makeImageSnapshot();
+                const base64Data = snapshot.encodeToBase64(ImageFormat.JPEG, 100);
+                if (!base64Data) {
+                  throw new Error('Unable to encode the processed camera frame.');
+                }
+
+                scheduleOnRN(saveProcessedPhoto, base64Data);
+              } catch (error: unknown) {
+                scheduleOnRN(
+                  failCapture,
+                  error instanceof Error ? error.message : 'Unable to capture photo.',
+                );
+              } finally {
+                snapshot?.dispose();
+                surface?.dispose();
+              }
+            }
           } finally {
             paint.dispose();
             shader.dispose();
@@ -82,7 +155,15 @@ export default function RealOrCamera() {
         frame.dispose();
       }
     },
-    [filmEffect, filmProfile, grainEnabled, halationEnabled],
+    [
+      captureRequested,
+      failCapture,
+      filmEffect,
+      filmProfile,
+      grainEnabled,
+      halationEnabled,
+      saveProcessedPhoto,
+    ],
   );
 
   useEffect(
@@ -110,27 +191,8 @@ export default function RealOrCamera() {
     if (statusTimeout.current) clearTimeout(statusTimeout.current);
     setIsCapturing(true);
     setErrorMessage(null);
-    setStatusMessage('Saving photo…');
-
-    let snapshot: ReturnType<SkiaCameraRef['takeSnapshot']> = undefined;
-    try {
-      snapshot = camera.current?.takeSnapshot();
-      if (!snapshot) {
-        throw new Error('The filtered camera preview is not ready yet.');
-      }
-
-      await saveSnapshotToLibrary(snapshot);
-      setStatusMessage('Saved to camera roll');
-      statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
-    } catch (error: unknown) {
-      setStatusMessage(null);
-      setErrorMessage(
-        error instanceof Error ? error.message : 'Unable to capture photo.',
-      );
-    } finally {
-      snapshot?.dispose();
-      setIsCapturing(false);
-    }
+    setStatusMessage('Capturing high-resolution frame…');
+    captureRequested.setBlocking(true);
   };
 
   if (!hasPermission) {
@@ -160,12 +222,11 @@ export default function RealOrCamera() {
     <View style={styles.container}>
       <StatusBar style="light" />
       <SkiaCamera
-        ref={camera}
         style={StyleSheet.absoluteFill}
         device={device}
         isActive
         constraints={[{ photoHDR: false }]}
-        enablePreviewSizedOutputBuffers
+        targetResolution={targetResolution}
         onFrame={renderFilmFrame}
         onError={(error) => setErrorMessage(error.message)}
       />

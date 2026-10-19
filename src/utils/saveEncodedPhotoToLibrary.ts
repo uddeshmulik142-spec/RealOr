@@ -1,19 +1,16 @@
 import { File, Paths } from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
-import { ImageFormat, type SkImage } from '@shopify/react-native-skia';
 
-export async function saveSnapshotToLibrary(snapshot: SkImage): Promise<void> {
+export async function saveEncodedPhotoToLibrary(base64Data: string): Promise<void> {
+  if (!base64Data) {
+    throw new Error('Processed photo data is empty.');
+  }
+
   let outputFile: File | undefined;
-
   try {
-    const bytes = snapshot.encodeToBytes(ImageFormat.JPEG, 95);
-    if (bytes.length === 0) {
-      throw new Error('Failed to encode the filtered camera preview.');
-    }
-
     outputFile = new File(Paths.cache, `realor-${Date.now()}.jpg`);
     outputFile.create({ intermediates: true });
-    await outputFile.write(bytes);
+    await outputFile.write(base64Data, { encoding: 'base64' });
 
     const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
     if (!permission.granted) {
