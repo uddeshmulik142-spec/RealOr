@@ -1,4 +1,4 @@
-name: Build unsigned iOS app
+name: RealOr iOS Build
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-ios:
-    runs-on: macos-13
+    runs-on: macos-14
     timeout-minutes: 60
 
     steps:
