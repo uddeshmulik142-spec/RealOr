@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useSharedValue, withTiming } from 'react-native-reanimated';
 import {
   Image,
   StyleSheet,
@@ -11,6 +12,7 @@ import * as Haptics from 'expo-haptics';
 import {
   useCameraDevice,
   useCameraPermission,
+  type CameraDevice,
 } from 'react-native-vision-camera';
 import {
   SkiaCamera,
@@ -42,20 +44,30 @@ const filmProfiles: { label: string; value: FilmProfile }[] = [
 ];
 const exposureStops = [-2, -1, 0, 1, 2] as const;
 
+function getNeutralZoomFactor(device: CameraDevice | undefined): number {
+  if (!device || !('neutralZoomFactor' in device)) return 1;
+
+  const neutralZoomFactor = device.neutralZoomFactor;
+  return typeof neutralZoomFactor === 'number' &&
+    Number.isFinite(neutralZoomFactor) &&
+    neutralZoomFactor > 0
+    ? neutralZoomFactor
+    : 1;
+}
+
+function clampZoom(zoom: number, device: CameraDevice): number {
+  return Math.min(device.maxZoom, Math.max(device.minZoom, zoom));
+}
+
 export default function RealOrCamera() {
   const [lens, setLens] = useState<'0.5x' | '1x' | '2x' | '5x'>('1x');
+  const device = useCameraDevice('back');
+  const [zoom, setZoom] = useState(() => getNeutralZoomFactor(device));
+  const animatedZoom = useSharedValue(zoom);
   const [exposure, setExposure] = useState<number>(0);
   const exposureTouchStart = useRef<{ x: number; y: number } | null>(null);
   const exposureStartY = useRef<number | null>(null);
   const exposureStartValue = useRef(0);
-  const device = useCameraDevice('back', {
-    physicalDevices:
-      lens === '0.5x'
-        ? ['ultra-wide-angle']
-        : lens === '5x'
-          ? ['telephoto']
-          : ['wide-angle'],
-  });
   const { hasPermission, canRequestPermission, requestPermission } =
     useCameraPermission();
   const captureRequested = React.useMemo(
@@ -94,6 +106,22 @@ export default function RealOrCamera() {
     maxExposure,
     Math.max(minExposure, exposure),
   );
+  const neutralZoom = getNeutralZoomFactor(device);
+  const zoomFactors = {
+    '0.5x': device ? clampZoom(device.minZoom, device) : 0.5 * neutralZoom,
+    '1x': device ? clampZoom(neutralZoom, device) : neutralZoom,
+    '2x': device ? clampZoom(neutralZoom * 2, device) : neutralZoom * 2,
+    '5x': device ? clampZoom(neutralZoom * 5, device) : neutralZoom * 5,
+  };
+
+  useEffect(() => {
+    if (!device) return;
+    setZoom(clampZoom(neutralZoom, device));
+  }, [device, neutralZoom]);
+
+  useEffect(() => {
+    animatedZoom.value = withTiming(zoom, { duration: 350 });
+  }, [animatedZoom, zoom]);
 
   const saveProcessedPhoto = React.useCallback(async (base64Data: string) => {
     try {
@@ -348,6 +376,10 @@ export default function RealOrCamera() {
     if (!device) return;
     setExposure(Math.min(maxExposure, Math.max(minExposure, value)));
   };
+  const selectLens = (lensOption: typeof lens) => {
+    setLens(lensOption);
+    setZoom(zoomFactors[lensOption]);
+  };
   const selectedExposureStop = exposureStops.reduce((nearest, stop) =>
     Math.abs(stop - boundedExposure) < Math.abs(nearest - boundedExposure)
       ? stop
@@ -372,7 +404,7 @@ export default function RealOrCamera() {
     return (
       <View style={styles.messageContainer}>
         <StatusBar style="light" />
-        <Text style={styles.message}>No {lens} camera found.</Text>
+        <Text style={styles.message}>No back camera found.</Text>
       </View>
     );
   }
@@ -412,17 +444,11 @@ export default function RealOrCamera() {
     >
       <StatusBar style="light" />
       <SkiaCamera
-        key={lens}
         style={StyleSheet.absoluteFill}
         device={device}
         isActive
+        zoom={animatedZoom}
         exposure={boundedExposure}
-        getInitialZoom={() =>
-          Math.min(
-            device.maxZoom,
-            Math.max(device.minZoom, lens === '2x' ? 2 : 1),
-          )
-        }
         constraints={[{ photoHDR: false }]}
         targetResolution={targetResolution}
         onFrame={renderFilmFrame}
@@ -551,7 +577,7 @@ export default function RealOrCamera() {
               accessibilityRole="button"
               accessibilityLabel={`Select ${lensOption} lens`}
               accessibilityState={{ selected: lens === lensOption }}
-              onPress={() => setLens(lensOption)}
+              onPress={() => selectLens(lensOption)}
               style={[
                 styles.lensButton,
                 lens === lensOption && styles.lensButtonSelected,

@@ -15,6 +15,7 @@ workflows:
           xcodebuild archive -workspace $(ls -d *.xcworkspace) -scheme RealOr -configuration Release -archivePath build/RealOr.xcarchive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
           mkdir -p build/Payload
           cp -R build/RealOr.xcarchive/Products/Applications/*.app build/Payload/
-          zip -r ../RealOr.ipa build/Payload
+          cd build
+          zip -r ../../RealOr.ipa Payload
     artifacts:
       - RealOr.ipa
