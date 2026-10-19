@@ -4,10 +4,10 @@ import { StatusBar } from 'expo-status-bar';
 import {
   useCameraDevice,
   useCameraPermission,
-  usePhotoOutput,
 } from 'react-native-vision-camera';
 import {
   SkiaCamera,
+  type SkiaCameraRef,
   type SkiaCameraProps,
 } from 'react-native-vision-camera-skia';
 import {
@@ -16,7 +16,7 @@ import {
   Skia,
   TileMode,
 } from '@shopify/react-native-skia';
-import { developPhoto } from './src/utils/developPhoto';
+import { saveSnapshotToLibrary } from './src/utils/saveSnapshotToLibrary';
 import {
   createFilmRuntimeEffect,
   type FilmProfile,
@@ -32,11 +32,7 @@ export default function RealOrCamera() {
   const device = useCameraDevice('back');
   const { hasPermission, canRequestPermission, requestPermission } =
     useCameraPermission();
-  const photoOutput = usePhotoOutput({
-    qualityPrioritization: device?.supportsSpeedQualityPrioritization
-      ? 'speed'
-      : 'balanced',
-  });
+  const camera = useRef<SkiaCameraRef>(null);
   const filmEffect = React.useMemo(() => createFilmRuntimeEffect(), []);
   const [isCapturing, setIsCapturing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -114,23 +110,16 @@ export default function RealOrCamera() {
     if (statusTimeout.current) clearTimeout(statusTimeout.current);
     setIsCapturing(true);
     setErrorMessage(null);
-    setStatusMessage('Developing photo…');
+    setStatusMessage('Saving photo…');
 
+    let snapshot: ReturnType<SkiaCameraRef['takeSnapshot']> = undefined;
     try {
-      const photo = await photoOutput.capturePhotoToFile(
-        {
-          flashMode: 'off',
-          enableShutterSound: false,
-          enableVirtualDeviceFusion: false,
-        },
-        {},
-      );
-      await developPhoto({
-        photoPath: photo.filePath,
-        profile: filmProfile,
-        grain: grainEnabled ? 0.35 : 0,
-        halation: halationEnabled ? 0.65 : 0,
-      });
+      snapshot = camera.current?.takeSnapshot();
+      if (!snapshot) {
+        throw new Error('The filtered camera preview is not ready yet.');
+      }
+
+      await saveSnapshotToLibrary(snapshot);
       setStatusMessage('Saved to camera roll');
       statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
     } catch (error: unknown) {
@@ -139,6 +128,7 @@ export default function RealOrCamera() {
         error instanceof Error ? error.message : 'Unable to capture photo.',
       );
     } finally {
+      snapshot?.dispose();
       setIsCapturing(false);
     }
   };
@@ -170,10 +160,10 @@ export default function RealOrCamera() {
     <View style={styles.container}>
       <StatusBar style="light" />
       <SkiaCamera
+        ref={camera}
         style={StyleSheet.absoluteFill}
         device={device}
         isActive
-        outputs={[photoOutput]}
         constraints={[{ photoHDR: false }]}
         enablePreviewSizedOutputBuffers
         onFrame={renderFilmFrame}
