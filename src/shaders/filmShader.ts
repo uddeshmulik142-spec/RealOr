@@ -63,6 +63,21 @@ float randomNoise(float2 position) {
   return fract(sin(dot(seededPosition, float2(12.9898, 78.233))) * 43758.5453);
 }
 
+float interpolatedNoise(float2 position) {
+  float2 cell = floor(position);
+  float2 fraction = fract(position);
+  float2 blend = fraction * fraction * (float2(3.0) - 2.0 * fraction);
+  float bottomLeft = randomNoise(cell);
+  float bottomRight = randomNoise(cell + float2(1.0, 0.0));
+  float topLeft = randomNoise(cell + float2(0.0, 1.0));
+  float topRight = randomNoise(cell + float2(1.0, 1.0));
+  return mix(
+    mix(bottomLeft, bottomRight, blend.x),
+    mix(topLeft, topRight, blend.x),
+    blend.y
+  );
+}
+
 half4 main(float2 position) {
   float2 resolution = max(u_resolution, float2(1.0));
   float resolutionScale = max(
@@ -76,17 +91,39 @@ half4 main(float2 position) {
   float3 right = sampleLinear(position + float2(neighborOffset.x, 0.0));
   float3 above = sampleLinear(position - float2(0.0, neighborOffset.y));
   float3 below = sampleLinear(position + float2(0.0, neighborOffset.y));
+  float r = max(2.0, min(u_resolution.x, u_resolution.y) * 0.0045);
+  float diagonalRadius = r * 0.70710678;
+  float3 haloTopLeft = sampleLinear(position + float2(-diagonalRadius, -diagonalRadius));
+  float3 haloTop = sampleLinear(position + float2(0.0, -r));
+  float3 haloTopRight = sampleLinear(position + float2(diagonalRadius, -diagonalRadius));
+  float3 haloRight = sampleLinear(position + float2(r, 0.0));
+  float3 haloBottomRight = sampleLinear(position + float2(diagonalRadius, diagonalRadius));
+  float3 haloBottom = sampleLinear(position + float2(0.0, r));
+  float3 haloBottomLeft = sampleLinear(position + float2(-diagonalRadius, diagonalRadius));
+  float3 haloLeft = sampleLinear(position + float2(-r, 0.0));
 
   float3 linearColor =
     center * 0.60 +
     (left + right + above + below) * 0.10;
 
-  float neighborHighlights =
-    max(luminance(left) - 0.68, 0.0) +
-    max(luminance(right) - 0.68, 0.0) +
-    max(luminance(above) - 0.68, 0.0) +
-    max(luminance(below) - 0.68, 0.0);
-  float halo = neighborHighlights * 0.25 * u_halation;
+  float ringHighlights =
+    max(luminance(haloTopLeft) - 0.68, 0.0) +
+    max(luminance(haloTop) - 0.68, 0.0) +
+    max(luminance(haloTopRight) - 0.68, 0.0) +
+    max(luminance(haloRight) - 0.68, 0.0) +
+    max(luminance(haloBottomRight) - 0.68, 0.0) +
+    max(luminance(haloBottom) - 0.68, 0.0) +
+    max(luminance(haloBottomLeft) - 0.68, 0.0) +
+    max(luminance(haloLeft) - 0.68, 0.0);
+  float halo = ringHighlights * 0.125 * u_halation;
+
+  float2 uv = position / resolution;
+  float2 radial = uv - float2(0.5, 0.5);
+  float radialDistance = length(radial);
+  float2 chromaticOffset =
+    radial * radialDistance * min(resolution.x, resolution.y) * 0.002;
+  linearColor.r = sampleLinear(position + chromaticOffset).r;
+  linearColor.b = sampleLinear(position - chromaticOffset).b;
   linearColor += float3(1.0, 0.22, 0.045) * halo;
 
   linearColor = applySubtractiveMatrix(linearColor);
@@ -106,11 +143,11 @@ half4 main(float2 position) {
   float3 srgb = pow(clamp(linearColor, 0.0, 1.0), float3(1.0 / 2.2));
   float luma = luminance(srgb);
   float midtoneWeight = 4.0 * luma * (1.0 - luma);
-  float grainScale = max(1.0, resolutionScale * 1.25);
-  float grain = (randomNoise(position / grainScale) - 0.5) * 2.0;
+  float coarseGrain = interpolatedNoise(position * 0.55);
+  float fineGrain = interpolatedNoise(position * 1.1);
+  float grain = (mix(coarseGrain, fineGrain, 0.35) - 0.5) * 2.0;
   srgb += grain * u_grain * midtoneWeight * 0.085;
 
-  float2 uv = position / resolution;
   float vignette = 1.0 - pow(distance(uv, float2(0.5, 0.5)), 2.0) * u_vignette;
   srgb *= clamp(vignette, 0.0, 1.0);
 

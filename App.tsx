@@ -1,5 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import {
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import {
@@ -34,9 +40,22 @@ const filmProfiles: { label: string; value: FilmProfile }[] = [
   { label: 'FUJI CHROME', value: 1 },
   { label: 'LEICA M', value: 2 },
 ];
+const exposureStops = [-2, -1, 0, 1, 2] as const;
 
 export default function RealOrCamera() {
-  const device = useCameraDevice('back');
+  const [lens, setLens] = useState<'0.5x' | '1x' | '2x' | '5x'>('1x');
+  const [exposure, setExposure] = useState<number>(0);
+  const exposureTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const exposureStartY = useRef<number | null>(null);
+  const exposureStartValue = useRef(0);
+  const device = useCameraDevice('back', {
+    physicalDevices:
+      lens === '0.5x'
+        ? ['ultra-wide-angle']
+        : lens === '5x'
+          ? ['telephoto']
+          : ['wide-angle'],
+  });
   const { hasPermission, canRequestPermission, requestPermission } =
     useCameraPermission();
   const captureRequested = React.useMemo(
@@ -69,6 +88,12 @@ export default function RealOrCamera() {
   const [vignetteEnabled, setVignetteEnabled] = useState(true);
   const [latestPhotoUri, setLatestPhotoUri] = useState<string | null>(null);
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const minExposure = device ? Math.max(-2, device.minExposureBias) : -2;
+  const maxExposure = device ? Math.min(2, device.maxExposureBias) : 2;
+  const boundedExposure = Math.min(
+    maxExposure,
+    Math.max(minExposure, exposure),
+  );
 
   const saveProcessedPhoto = React.useCallback(async (base64Data: string) => {
     try {
@@ -307,6 +332,28 @@ export default function RealOrCamera() {
     captureRequested.setBlocking(true);
   };
 
+  const updateExposureFromDrag = (pageY: number) => {
+    if (exposureStartY.current === null || !device) return;
+
+    const nextExposure =
+      exposureStartValue.current - (pageY - exposureStartY.current) / 80;
+    const clampedExposure = Math.min(
+      maxExposure,
+      Math.max(minExposure, nextExposure),
+    );
+    setExposure(Math.round(clampedExposure * 10) / 10);
+  };
+
+  const selectExposure = (value: number) => {
+    if (!device) return;
+    setExposure(Math.min(maxExposure, Math.max(minExposure, value)));
+  };
+  const selectedExposureStop = exposureStops.reduce((nearest, stop) =>
+    Math.abs(stop - boundedExposure) < Math.abs(nearest - boundedExposure)
+      ? stop
+      : nearest,
+  );
+
   if (!hasPermission) {
     return (
       <View style={styles.messageContainer}>
@@ -325,23 +372,111 @@ export default function RealOrCamera() {
     return (
       <View style={styles.messageContainer}>
         <StatusBar style="light" />
-        <Text style={styles.message}>No camera found.</Text>
+        <Text style={styles.message}>No {lens} camera found.</Text>
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <View
+      style={styles.container}
+      onTouchStart={(event) => {
+        exposureTouchStart.current = {
+          x: event.nativeEvent.pageX,
+          y: event.nativeEvent.pageY,
+        };
+      }}
+      onMoveShouldSetResponder={(event) => {
+        const touchStart = exposureTouchStart.current;
+        if (!touchStart) return false;
+        const dx = event.nativeEvent.pageX - touchStart.x;
+        const dy = event.nativeEvent.pageY - touchStart.y;
+        return Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx);
+      }}
+      onResponderGrant={(event) => {
+        exposureStartY.current =
+          exposureTouchStart.current?.y ?? event.nativeEvent.pageY;
+        exposureStartValue.current = boundedExposure;
+      }}
+      onResponderMove={(event) =>
+        updateExposureFromDrag(event.nativeEvent.pageY)
+      }
+      onResponderRelease={() => {
+        exposureStartY.current = null;
+        exposureTouchStart.current = null;
+      }}
+      onResponderTerminate={() => {
+        exposureStartY.current = null;
+        exposureTouchStart.current = null;
+      }}
+    >
       <StatusBar style="light" />
       <SkiaCamera
+        key={lens}
         style={StyleSheet.absoluteFill}
         device={device}
         isActive
+        exposure={boundedExposure}
+        getInitialZoom={() =>
+          Math.min(
+            device.maxZoom,
+            Math.max(device.minZoom, lens === '2x' ? 2 : 1),
+          )
+        }
         constraints={[{ photoHDR: false }]}
         targetResolution={targetResolution}
         onFrame={renderFilmFrame}
         onError={(error) => setErrorMessage(error.message)}
       />
+      <View
+        style={styles.exposureIndicator}
+        accessibilityLabel={`Exposure ${boundedExposure >= 0 ? '+' : ''}${boundedExposure.toFixed(1)} EV`}
+      >
+        <View style={styles.exposureHeader}>
+          <Text style={styles.exposureValue}>
+            EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
+          </Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Reset exposure to zero"
+            onPress={() => selectExposure(0)}
+            style={styles.exposureReset}
+          >
+            <Text style={styles.exposureResetText}>RESET</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.exposureScale}>
+          {exposureStops.map((stop) => {
+            const isSelected = selectedExposureStop === stop;
+            const label = `${stop > 0 ? '+' : ''}${stop}`;
+            return (
+              <TouchableOpacity
+                key={stop}
+                accessibilityRole="button"
+                accessibilityLabel={`Set exposure to ${label} EV`}
+                accessibilityState={{ selected: isSelected }}
+                onPress={() => selectExposure(stop)}
+                style={styles.exposureTickButton}
+              >
+                <Text
+                  style={[
+                    styles.exposureTickLabel,
+                    isSelected && styles.exposureTickLabelSelected,
+                  ]}
+                >
+                  {label}
+                </Text>
+                <View
+                  style={[
+                    styles.exposureTick,
+                    isSelected && styles.exposureTickSelected,
+                  ]}
+                />
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
       <View style={styles.controls}>
         {errorMessage ? (
           <Text style={styles.error} accessibilityRole="alert">
@@ -409,6 +544,30 @@ export default function RealOrCamera() {
             </Text>
           </TouchableOpacity>
         </View>
+        <View style={styles.lensSelector}>
+          {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => (
+            <TouchableOpacity
+              key={lensOption}
+              accessibilityRole="button"
+              accessibilityLabel={`Select ${lensOption} lens`}
+              accessibilityState={{ selected: lens === lensOption }}
+              onPress={() => setLens(lensOption)}
+              style={[
+                styles.lensButton,
+                lens === lensOption && styles.lensButtonSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.lensText,
+                  lens === lensOption && styles.lensTextSelected,
+                ]}
+              >
+                {lensOption}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
         <TouchableOpacity
           accessibilityLabel="Take photo"
           accessibilityRole="button"
@@ -457,7 +616,7 @@ const styles = StyleSheet.create({
   },
   controls: {
     position: 'absolute',
-    bottom: 40,
+    bottom: 28,
     width: '100%',
     alignItems: 'center',
     paddingHorizontal: 12,
@@ -538,6 +697,104 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     fontWeight: '600',
+  },
+  lensSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#ffffff55',
+    backgroundColor: '#00000099',
+    padding: 5,
+    marginBottom: 16,
+  },
+  lensButton: {
+    minWidth: 54,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+  },
+  lensButtonSelected: {
+    backgroundColor: '#fff',
+  },
+  lensText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  lensTextSelected: {
+    color: '#111',
+  },
+  exposureIndicator: {
+    position: 'absolute',
+    right: 18,
+    top: '42%',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    backgroundColor: '#00000088',
+  },
+  exposureHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  exposureValue: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  exposureReset: {
+    marginTop: 7,
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: '#ffffff22',
+  },
+  exposureResetText: {
+    color: '#ffffffcc',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  exposureScale: {
+    flexDirection: 'row',
+    marginTop: 8,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  exposureTickButton: {
+    minWidth: 30,
+    height: 32,
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  exposureTickLabel: {
+    color: '#ffffffaa',
+    fontSize: 11,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+    textAlign: 'center',
+  },
+  exposureTickLabelSelected: {
+    color: '#fff',
+    fontWeight: '800',
+  },
+  exposureTick: {
+    width: 14,
+    height: 1,
+    backgroundColor: '#ffffff99',
+  },
+  exposureTickSelected: {
+    width: 20,
+    height: 2,
+    backgroundColor: '#fff',
   },
   shutterButton: {
     width: 72,
