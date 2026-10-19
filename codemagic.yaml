@@ -1,0 +1,20 @@
+workflows:
+  ios-free-build:
+    name: RealOr Free iOS Build
+    instance_type: mac_mini_m2
+    environment:
+      node: latest
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Expo Prebuild
+        script: npx expo prebuild --platform ios
+      - name: Build Unsigned IPA
+        script: |
+          cd ios
+          xcodebuild archive -workspace $(ls -d *.xcworkspace) -scheme RealOr -configuration Release -archivePath build/RealOr.xcarchive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
+          mkdir -p build/Payload
+          cp -R build/RealOr.xcarchive/Products/Applications/*.app build/Payload/
+          zip -r ../RealOr.ipa build/Payload
+    artifacts:
+      - RealOr.ipa
