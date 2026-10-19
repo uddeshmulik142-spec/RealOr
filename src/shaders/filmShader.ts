@@ -62,13 +62,18 @@ float randomNoise(float2 position) {
 }
 
 half4 main(float2 position) {
-  float2 texel = 1.0 / max(u_resolution, float2(1.0));
+  float2 resolution = max(u_resolution, float2(1.0));
+  float resolutionScale = max(
+    1.0,
+    max(resolution.x, resolution.y) / 1920.0
+  );
+  float2 neighborOffset = float2(resolutionScale, resolutionScale);
   float4 centerSample = image.eval(position);
   float3 center = sampleLinear(position);
-  float3 left = sampleLinear(position - float2(texel.x * 0.5, 0.0));
-  float3 right = sampleLinear(position + float2(texel.x * 0.5, 0.0));
-  float3 above = sampleLinear(position - float2(0.0, texel.y * 0.5));
-  float3 below = sampleLinear(position + float2(0.0, texel.y * 0.5));
+  float3 left = sampleLinear(position - float2(neighborOffset.x, 0.0));
+  float3 right = sampleLinear(position + float2(neighborOffset.x, 0.0));
+  float3 above = sampleLinear(position - float2(0.0, neighborOffset.y));
+  float3 below = sampleLinear(position + float2(0.0, neighborOffset.y));
 
   float3 linearColor =
     center * 0.60 +
@@ -99,7 +104,8 @@ half4 main(float2 position) {
   float3 srgb = pow(clamp(linearColor, 0.0, 1.0), float3(1.0 / 2.2));
   float luma = luminance(srgb);
   float midtoneWeight = 4.0 * luma * (1.0 - luma);
-  float grain = (randomNoise(position) - 0.5) * 2.0;
+  float grainScale = max(1.0, resolutionScale * 1.25);
+  float grain = (randomNoise(position / grainScale) - 0.5) * 2.0;
   srgb += grain * u_grain * midtoneWeight * 0.085;
 
   return half4(clamp(srgb, 0.0, 1.0), centerSample.a);

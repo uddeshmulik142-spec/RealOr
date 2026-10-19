@@ -15,6 +15,8 @@ import {
   MipmapMode,
   Skia,
   TileMode,
+  type SkPaint,
+  type SkShader,
   type SkImage,
   type SkSurface,
 } from '@shopify/react-native-skia';
@@ -93,41 +95,112 @@ export default function RealOrCamera() {
         render(({ canvas, frameTexture }) => {
           const width = frameTexture.width();
           const height = frameTexture.height();
-          const imageShader = frameTexture.makeShaderOptions(
+          const screenImageShader = frameTexture.makeShaderOptions(
             TileMode.Clamp,
             TileMode.Clamp,
             FilterMode.Linear,
             MipmapMode.None,
           );
-          const shader = filmEffect.makeShaderWithChildren(
-            [
+          let screenShader: SkShader | undefined;
+          let screenPaint: SkPaint | undefined;
+
+          try {
+            const screenUniforms = [
               width,
               height,
               filmProfile,
               grainEnabled ? 0.35 : 0,
               halationEnabled ? 0.65 : 0,
               17,
-            ],
-            [imageShader],
-          );
-          const paint = Skia.Paint();
-
-          try {
-            paint.setShader(shader);
-            canvas.drawImage(frameTexture, 0, 0, paint);
+            ];
+            screenShader = filmEffect.makeShaderWithChildren(
+              screenUniforms,
+              [screenImageShader],
+            );
+            screenPaint = Skia.Paint();
+            screenPaint.setShader(screenShader);
+            canvas.drawRect(
+              Skia.XYWHRect(0, 0, width, height),
+              screenPaint,
+            );
 
             if (captureRequested.getBlocking()) {
               captureRequested.setBlocking(false);
 
               let surface: SkSurface | null = null;
               let snapshot: SkImage | undefined;
+              let highResImageShader: SkShader | undefined;
+              let highResShader: SkShader | undefined;
+              let offscreenPaint: SkPaint | undefined;
               try {
-                surface = Skia.Surface.MakeOffscreen(width, height);
+                const isLandscape =
+                  frame.orientation === 'left' || frame.orientation === 'right';
+                const outputWidth = isLandscape ? height : width;
+                const outputHeight = isLandscape ? width : height;
+                const highResUniforms = [
+                  width,
+                  height,
+                  filmProfile,
+                  grainEnabled ? 0.35 : 0,
+                  halationEnabled ? 0.65 : 0,
+                  17,
+                ];
+
+                highResImageShader = frameTexture.makeShaderOptions(
+                  TileMode.Clamp,
+                  TileMode.Clamp,
+                  FilterMode.Linear,
+                  MipmapMode.None,
+                );
+                highResShader = filmEffect.makeShaderWithChildren(
+                  highResUniforms,
+                  [highResImageShader],
+                );
+                offscreenPaint = Skia.Paint();
+                offscreenPaint.setShader(highResShader);
+
+                surface = Skia.Surface.MakeOffscreen(outputWidth, outputHeight);
                 if (!surface) {
                   throw new Error('Unable to create the high-resolution capture surface.');
                 }
 
-                surface.getCanvas().drawImage(frameTexture, 0, 0, paint);
+                const offscreenCanvas = surface.getCanvas();
+                offscreenCanvas.save();
+                try {
+                  offscreenCanvas.translate(outputWidth / 2, outputHeight / 2);
+                  if (frame.isMirrored) {
+                    offscreenCanvas.scale(-1, 1);
+                  }
+
+                  let rotation = 0;
+                  if (frame.orientation === 'right') {
+                    rotation = 90;
+                  } else if (frame.orientation === 'down') {
+                    rotation = 180;
+                  } else if (frame.orientation === 'left') {
+                    rotation = 270;
+                  }
+                  const counterRotation = ((-rotation % 360) + 360) % 360;
+                  offscreenCanvas.rotate(counterRotation, 0, 0);
+                  if (isLandscape) {
+                    offscreenCanvas.translate(
+                      -outputHeight / 2,
+                      -outputWidth / 2,
+                    );
+                  } else {
+                    offscreenCanvas.translate(
+                      -outputWidth / 2,
+                      -outputHeight / 2,
+                    );
+                  }
+                  offscreenCanvas.drawRect(
+                    Skia.XYWHRect(0, 0, width, height),
+                    offscreenPaint,
+                  );
+                } finally {
+                  offscreenCanvas.restore();
+                }
+
                 snapshot = surface.makeImageSnapshot();
                 const base64Data = snapshot.encodeToBase64(ImageFormat.JPEG, 100);
                 if (!base64Data) {
@@ -143,12 +216,15 @@ export default function RealOrCamera() {
               } finally {
                 snapshot?.dispose();
                 surface?.dispose();
+                offscreenPaint?.dispose();
+                highResShader?.dispose();
+                highResImageShader?.dispose();
               }
             }
           } finally {
-            paint.dispose();
-            shader.dispose();
-            imageShader.dispose();
+            screenPaint?.dispose();
+            screenShader?.dispose();
+            screenImageShader.dispose();
           }
         });
       } finally {
