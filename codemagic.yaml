@@ -12,19 +12,23 @@ workflows:
       - name: Build Unsigned IPA
         script: |
           set -euo pipefail
-          cd ios
+
+          # Find the workspace file dynamically from root
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -n 1)
+          echo "Using workspace: $WORKSPACE"
+
           xcodebuild archive \
-            -workspace $(ls -d *.xcworkspace) \
+            -workspace "$WORKSPACE" \
             -scheme RealOr \
             -configuration Release \
-            -archivePath build/RealOr.xcarchive \
+            -archivePath ios/build/RealOr.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_IDENTITY=""
 
-          mkdir -p build/Payload
-          cp -R build/RealOr.xcarchive/Products/Applications/*.app build/Payload/
-          cd build
+          mkdir -p ios/build/Payload
+          cp -R ios/build/RealOr.xcarchive/Products/Applications/*.app ios/build/Payload/
+          cd ios/build
           zip -r ../../RealOr.ipa Payload
           cd ../..
           test -s RealOr.ipa || (echo "RealOr.ipa was not generated" && exit 1)
