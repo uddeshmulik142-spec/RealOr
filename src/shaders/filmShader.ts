@@ -1,157 +1,183 @@
 import { Skia } from '@shopify/react-native-skia';
 
-export type FilmProfile = 0 | 1 | 2;
+export type FilmProfile = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 export interface FilmShaderSettings {
   profile: FilmProfile;
   grain: number;
   halation: number;
+  exposure: number;
   vignette: number;
   seed?: number;
 }
 
 export const filmShaderSource = `
 uniform shader image;
+uniform shader u_previousFrame;
+uniform float2 u_prevResolution;
+uniform float u_mxMix;
 uniform float2 u_resolution;
 uniform float u_profile;
 uniform float u_grain;
 uniform float u_halation;
-uniform float u_vignette;
 uniform float u_seed;
+uniform float u_exposure;
+uniform float u_vignette;
 
-float3 sampleLinear(float2 position) {
-  return pow(max(image.eval(position).rgb, float3(0.0)), float3(2.2));
+float hash(float2 p) {
+  p = fract(p * float2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
 }
 
-float luminance(float3 color) {
-  return dot(color, float3(0.2126, 0.7152, 0.0722));
+float3 toLinear(float3 c) {
+  return pow(max(c, float3(0.0)), float3(2.2));
 }
 
-float3 applySubtractiveMatrix(float3 color) {
-  float3 density;
+float3 toSRGB(float3 c) {
+  return pow(max(c, float3(0.0)), float3(1.0 / 2.2));
+}
 
-  if (u_profile < 0.5) {
-    density = float3(
-      dot(color, float3(0.075, 0.025, 0.010)),
-      dot(color, float3(0.018, 0.070, 0.020)),
-      dot(color, float3(0.008, 0.030, 0.085))
-    );
-  } else if (u_profile < 1.5) {
-    density = float3(
-      dot(color, float3(0.090, 0.015, 0.005)),
-      dot(color, float3(0.010, 0.065, 0.025)),
-      dot(color, float3(0.005, 0.040, 0.110))
-    );
-  } else {
-    density = float3(
-      dot(color, float3(0.060, 0.020, 0.015)),
-      dot(color, float3(0.015, 0.055, 0.025)),
-      dot(color, float3(0.015, 0.025, 0.070))
-    );
+float3 filmDensityCurve(float3 x, float toe, float shoulder) {
+  float3 a = float3(toe);
+  float3 b = float3(shoulder);
+  return (x * (x + a)) / (x * (x + a) + b);
+}
+
+half4 main(float2 xy) {
+  float2 uv = xy / u_resolution;
+
+  float2 centerOffset = uv - 0.5;
+  float aberrationStrength = 0.0035;
+  float2 redCoord = xy + centerOffset * aberrationStrength * u_resolution;
+  float2 blueCoord = xy - centerOffset * aberrationStrength * u_resolution;
+
+  float rChannel = toLinear(image.eval(redCoord).rgb).r;
+  float gChannel = toLinear(image.eval(xy).rgb).g;
+  float bChannel = toLinear(image.eval(blueCoord).rgb).b;
+  float3 center = float3(rChannel, gChannel, bChannel);
+
+  center *= pow(2.0, u_exposure);
+
+  float3 n1 = toLinear(image.eval(xy + float2(0.8, 0.0)).rgb);
+  float3 n2 = toLinear(image.eval(xy - float2(0.8, 0.0)).rgb);
+  float3 n3 = toLinear(image.eval(xy + float2(0.0, 0.8)).rgb);
+  float3 n4 = toLinear(image.eval(xy - float2(0.0, 0.8)).rgb);
+  float3 linearRGB = center * 0.55 + (n1 + n2 + n3 + n4) * 0.1125;
+
+  if (u_mxMix > 0.01) {
+    float2 previousCoord = (xy / u_resolution) * u_prevResolution;
+    float3 previousSample = u_previousFrame.eval(previousCoord).rgb;
+    linearRGB += toLinear(previousSample) * u_mxMix;
   }
 
-  return max(color - density, float3(0.0));
-}
-
-float hdCurve(float exposure) {
-  float logExposure = log(1.0 + 9.0 * clamp(exposure, 0.0, 1.0)) / log(10.0);
-  return smoothstep(0.0, 1.0, logExposure);
-}
-
-float randomNoise(float2 position) {
-  float2 seededPosition = floor(position) + float2(u_seed, u_seed * 0.73);
-  return fract(sin(dot(seededPosition, float2(12.9898, 78.233))) * 43758.5453);
-}
-
-float interpolatedNoise(float2 position) {
-  float2 cell = floor(position);
-  float2 fraction = fract(position);
-  float2 blend = fraction * fraction * (float2(3.0) - 2.0 * fraction);
-  float bottomLeft = randomNoise(cell);
-  float bottomRight = randomNoise(cell + float2(1.0, 0.0));
-  float topLeft = randomNoise(cell + float2(0.0, 1.0));
-  float topRight = randomNoise(cell + float2(1.0, 1.0));
-  return mix(
-    mix(bottomLeft, bottomRight, blend.x),
-    mix(topLeft, topRight, blend.x),
-    blend.y
-  );
-}
-
-half4 main(float2 position) {
-  float2 resolution = max(u_resolution, float2(1.0));
-  float resolutionScale = max(
-    1.0,
-    max(resolution.x, resolution.y) / 1920.0
-  );
-  float2 neighborOffset = float2(resolutionScale, resolutionScale);
-  float4 centerSample = image.eval(position);
-  float3 center = sampleLinear(position);
-  float3 left = sampleLinear(position - float2(neighborOffset.x, 0.0));
-  float3 right = sampleLinear(position + float2(neighborOffset.x, 0.0));
-  float3 above = sampleLinear(position - float2(0.0, neighborOffset.y));
-  float3 below = sampleLinear(position + float2(0.0, neighborOffset.y));
-  float r = max(2.0, min(u_resolution.x, u_resolution.y) * 0.0045);
-  float diagonalRadius = r * 0.70710678;
-  float3 haloTopLeft = sampleLinear(position + float2(-diagonalRadius, -diagonalRadius));
-  float3 haloTop = sampleLinear(position + float2(0.0, -r));
-  float3 haloTopRight = sampleLinear(position + float2(diagonalRadius, -diagonalRadius));
-  float3 haloRight = sampleLinear(position + float2(r, 0.0));
-  float3 haloBottomRight = sampleLinear(position + float2(diagonalRadius, diagonalRadius));
-  float3 haloBottom = sampleLinear(position + float2(0.0, r));
-  float3 haloBottomLeft = sampleLinear(position + float2(-diagonalRadius, diagonalRadius));
-  float3 haloLeft = sampleLinear(position + float2(-r, 0.0));
-
-  float3 linearColor =
-    center * 0.60 +
-    (left + right + above + below) * 0.10;
-
-  float ringHighlights =
-    max(luminance(haloTopLeft) - 0.68, 0.0) +
-    max(luminance(haloTop) - 0.68, 0.0) +
-    max(luminance(haloTopRight) - 0.68, 0.0) +
-    max(luminance(haloRight) - 0.68, 0.0) +
-    max(luminance(haloBottomRight) - 0.68, 0.0) +
-    max(luminance(haloBottom) - 0.68, 0.0) +
-    max(luminance(haloBottomLeft) - 0.68, 0.0) +
-    max(luminance(haloLeft) - 0.68, 0.0);
-  float halo = ringHighlights * 0.125 * u_halation;
-
-  float2 uv = position / resolution;
-  float2 radial = uv - float2(0.5, 0.5);
-  float radialDistance = length(radial);
-  float2 chromaticOffset =
-    radial * radialDistance * min(resolution.x, resolution.y) * 0.002;
-  linearColor.r = sampleLinear(position + chromaticOffset).r;
-  linearColor.b = sampleLinear(position - chromaticOffset).b;
-  linearColor += float3(1.0, 0.22, 0.045) * halo;
-
-  linearColor = applySubtractiveMatrix(linearColor);
-  if (u_profile < 0.5) {
-    linearColor = clamp((linearColor - 0.42) * 1.08 + 0.42, 0.0, 1.0);
-  } else if (u_profile < 1.5) {
-    linearColor = clamp((linearColor - 0.46) * 1.16 + 0.46, 0.0, 1.0);
+  float radius = max(2.0, min(u_resolution.x, u_resolution.y) * 0.0045);
+  float diagonalRadius = radius * 0.70710678;
+  float3 h1 = toLinear(image.eval(xy + float2(0.0, -radius)).rgb);
+  float3 h2 = toLinear(image.eval(xy + float2(diagonalRadius, -diagonalRadius)).rgb);
+  float3 h3 = toLinear(image.eval(xy + float2(radius, 0.0)).rgb);
+  float3 h4 = toLinear(image.eval(xy + float2(diagonalRadius, diagonalRadius)).rgb);
+  float3 h5 = toLinear(image.eval(xy + float2(0.0, radius)).rgb);
+  float3 h6 = toLinear(image.eval(xy + float2(-diagonalRadius, diagonalRadius)).rgb);
+  float3 h7 = toLinear(image.eval(xy + float2(-radius, 0.0)).rgb);
+  float3 h8 = toLinear(image.eval(xy + float2(-diagonalRadius, -diagonalRadius)).rgb);
+  float3 localAvg = (h1 + h2 + h3 + h4 + h5 + h6 + h7 + h8) * 0.125;
+  float highlightLum = dot(localAvg, float3(0.2126, 0.7152, 0.0722));
+  float halationMultiplier =
+    (u_profile > 2.5 && u_profile < 3.5) ? 1.8 : 1.0;
+  float halationMask =
+    smoothstep(0.55, 1.2, highlightLum) * u_halation * halationMultiplier;
+  if (u_profile > 4.5 && u_profile < 6.5) {
+    linearRGB += float3(1.0) * halationMask * 0.45;
   } else {
-    linearColor = clamp((linearColor - 0.40) * 1.12 + 0.40, 0.0, 1.0);
+    linearRGB += float3(1.0, 0.22, 0.02) * halationMask * 0.45;
   }
-  linearColor = float3(
-    hdCurve(linearColor.r),
-    hdCurve(linearColor.g),
-    hdCurve(linearColor.b)
-  );
 
-  float3 srgb = pow(clamp(linearColor, 0.0, 1.0), float3(1.0 / 2.2));
-  float luma = luminance(srgb);
+  float3 graded = linearRGB;
+
+  if (u_profile < 0.5) {
+    graded.r = dot(linearRGB, float3(1.07, 0.03, -0.04));
+    graded.g = dot(linearRGB, float3(0.02, 0.99, -0.01));
+    graded.b = dot(linearRGB, float3(-0.02, 0.05, 0.85));
+    graded = filmDensityCurve(max(graded, 0.0), 0.17, 0.23);
+    graded += float3(0.014, 0.010, 0.006);
+  } else if (u_profile < 1.5) {
+    graded.r = dot(linearRGB, float3(0.93, 0.04, -0.02));
+    graded.g = dot(linearRGB, float3(-0.03, 1.06, 0.01));
+    graded.b = dot(linearRGB, float3(-0.04, 0.09, 1.03));
+    graded = filmDensityCurve(max(graded, 0.0), 0.11, 0.27);
+    graded += float3(0.005, 0.011, 0.015);
+  } else if (u_profile < 2.5) {
+    graded.r = dot(linearRGB, float3(1.09, -0.04, -0.03));
+    graded.g = dot(linearRGB, float3(-0.02, 1.01, 0.01));
+    graded.b = dot(linearRGB, float3(-0.01, 0.02, 1.03));
+    graded = filmDensityCurve(max(graded, 0.0), 0.08, 0.29);
+  } else if (u_profile < 3.5) {
+    graded.r = dot(linearRGB, float3(0.95, 0.08, -0.03));
+    graded.g = dot(linearRGB, float3(-0.02, 1.02, 0.02));
+    graded.b = dot(linearRGB, float3(-0.05, 0.12, 1.15));
+    graded = filmDensityCurve(max(graded, 0.0), 0.12, 0.22);
+    graded += float3(0.0, 0.01, 0.035);
+  } else if (u_profile < 4.5) {
+    graded.r = dot(linearRGB, float3(0.90, 0.08, -0.02));
+    graded.g = dot(linearRGB, float3(-0.05, 1.12, -0.02));
+    graded.b = dot(linearRGB, float3(-0.03, 0.04, 0.92));
+    graded = filmDensityCurve(max(graded, 0.0), 0.19, 0.21);
+    graded += float3(0.008, 0.018, 0.012);
+  } else if (u_profile < 5.5) {
+    float luma = dot(linearRGB, float3(0.299, 0.587, 0.114));
+    graded = float3(luma);
+    graded = filmDensityCurve(max(graded, 0.0), 0.22, 0.18);
+  } else if (u_profile < 6.5) {
+    float luma = dot(linearRGB, float3(0.2126, 0.7152, 0.0722));
+    graded = float3(luma);
+    graded = filmDensityCurve(max(graded, 0.0), 0.10, 0.28);
+  } else if (u_profile < 7.5) {
+    graded.r = dot(linearRGB, float3(1.12, -0.05, -0.02));
+    graded.g = dot(linearRGB, float3(-0.02, 1.08, -0.02));
+    graded.b = dot(linearRGB, float3(-0.04, 0.02, 1.10));
+    graded = filmDensityCurve(max(graded, 0.0), 0.06, 0.35);
+  } else {
+    graded.r = dot(linearRGB, float3(1.15, -0.02, -0.05));
+    graded.g = dot(linearRGB, float3(0.01, 1.05, -0.02));
+    graded.b = dot(linearRGB, float3(-0.02, 0.02, 0.95));
+    graded = filmDensityCurve(max(graded, 0.0), 0.15, 0.25);
+    graded += float3(0.02, 0.008, 0.004);
+  }
+
+  float3 displayRGB = toSRGB(graded);
+
+  if (u_vignette > 0.05) {
+    float distFromCenter = distance(uv, float2(0.5, 0.5));
+    float vig = smoothstep(
+      0.85,
+      0.2,
+      distFromCenter * (1.0 + u_vignette * 0.2)
+    );
+    displayRGB *= mix(1.0 - (u_vignette * 0.35), 1.0, vig);
+  }
+
+  float grainAmount = u_grain;
+  if (u_profile > 4.5 && u_profile < 5.5) grainAmount *= 1.6;
+  if (u_profile > 2.5 && u_profile < 3.5) grainAmount *= 1.3;
+
+  float luma = dot(displayRGB, float3(0.299, 0.587, 0.114));
   float midtoneWeight = 4.0 * luma * (1.0 - luma);
-  float coarseGrain = interpolatedNoise(position * 0.55);
-  float fineGrain = interpolatedNoise(position * 1.1);
-  float grain = (mix(coarseGrain, fineGrain, 0.35) - 0.5) * 2.0;
-  srgb += grain * u_grain * midtoneWeight * 0.085;
+  float2 seededXY = xy + float2(u_seed, u_seed * 1.37);
+  float coarseGrain = hash(floor(seededXY * 0.55));
+  float fineGrain = hash(floor(seededXY * 1.1));
+  float grain = mix(coarseGrain, fineGrain, 0.35);
+  float n = (grain - 0.5) * grainAmount * midtoneWeight;
 
-  float vignette = 1.0 - pow(distance(uv, float2(0.5, 0.5)), 2.0) * u_vignette;
-  srgb *= clamp(vignette, 0.0, 1.0);
+  if (u_profile > 4.5 && u_profile < 6.5) {
+    displayRGB += float3(n);
+  } else {
+    displayRGB.r += n * 1.05;
+    displayRGB.g += n * 0.95;
+    displayRGB.b += n * 1.10;
+  }
 
-  return half4(clamp(srgb, 0.0, 1.0), centerSample.a);
+  return half4(clamp(displayRGB, 0.0, 1.0), 1.0);
 }
 `;
 

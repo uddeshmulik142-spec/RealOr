@@ -9,6 +9,7 @@ import {
   Image,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -45,12 +46,34 @@ import {
   type FilmProfile,
 } from './src/shaders/filmShader';
 
-const filmProfiles: { label: string; value: FilmProfile }[] = [
-  { label: 'KODAK 400', value: 0 },
-  { label: 'FUJI CHROME', value: 1 },
-  { label: 'LEICA M', value: 2 },
+const FILM_STOCKS: { id: FilmProfile; name: string }[] = [
+  { id: 0, name: 'PORTRA 400' },
+  { id: 1, name: 'CLASSIC CHROME' },
+  { id: 2, name: 'LEICA M' },
+  { id: 3, name: 'CINESTILL 800T' },
+  { id: 4, name: 'CLASSIC NEG' },
+  { id: 5, name: 'TRI-X 400' },
+  { id: 6, name: 'ACROS 100' },
+  { id: 7, name: 'EKTACHROME' },
+  { id: 8, name: 'AGFA VISTA' },
 ];
 const exposureStops = [-2, -1, 0, 1, 2] as const;
+const aspectRatios = ['3:4', '6:7', '1:1', '16:9'] as const;
+type AspectRatio = (typeof aspectRatios)[number];
+
+function getAspectRatioValue(ratio: AspectRatio): number {
+  switch (ratio) {
+    case '6:7':
+      return 6 / 7;
+    case '1:1':
+      return 1;
+    case '16:9':
+      return 16 / 9;
+    default:
+      return 3 / 4;
+  }
+}
+
 function getNeutralZoomFactor(device: CameraDevice | undefined): number {
   if (!device) return 1;
 
@@ -117,6 +140,30 @@ export default function RealOrCamera() {
     () => createSynchronizable(false, { fixedType: true }),
     [],
   );
+  const firstExposureImage = React.useMemo(
+    () => createSynchronizable<SkImage | null>(null),
+    [],
+  );
+  const firstExposureRequested = React.useMemo(
+    () => createSynchronizable(false, { fixedType: true }),
+    [],
+  );
+  const finalExposureRequested = React.useMemo(
+    () => createSynchronizable(false, { fixedType: true }),
+    [],
+  );
+  const clearFirstExposureRequested = React.useMemo(
+    () => createSynchronizable(false, { fixedType: true }),
+    [],
+  );
+  const firstExposureAvailable = React.useMemo(
+    () => createSynchronizable(false, { fixedType: true }),
+    [],
+  );
+  const liveMxMix = React.useMemo(
+    () => createSynchronizable(0),
+    [],
+  );
   const filmEffect = React.useMemo(() => createFilmRuntimeEffect(), []);
   const targetResolution = React.useMemo(() => {
     const resolutions = device?.getSupportedResolutions('stream') ?? [];
@@ -138,13 +185,16 @@ export default function RealOrCamera() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [filmProfile, setFilmProfile] = useState<FilmProfile>(0);
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('3:4');
+  const [mxMode, setMxMode] = useState(false);
+  const [isAwaitingSecondExposure, setIsAwaitingSecondExposure] =
+    useState(false);
   const [grainEnabled, setGrainEnabled] = useState(true);
   const [halationEnabled, setHalationEnabled] = useState(true);
   const [vignetteEnabled, setVignetteEnabled] = useState(true);
   const [latestPhotoUri, setLatestPhotoUri] = useState<string | null>(null);
   const [archiveVisible, setArchiveVisible] = useState(false);
   const [photosTaken, setPhotosTaken] = useState(0);
-  const captureDetails = useRef({ filmProfile, exposure });
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const minExposure = device ? Math.max(-2, device.minExposureBias) : -2;
   const maxExposure = device ? Math.min(2, device.maxExposureBias) : 2;
@@ -184,6 +234,7 @@ export default function RealOrCamera() {
     setStatusMessage(null);
     setErrorMessage(message);
     setIsCapturing(false);
+    setIsAwaitingSecondExposure(false);
   }, []);
 
   const renderFilmFrame = React.useCallback<SkiaCameraProps['onFrame']>(
@@ -194,28 +245,59 @@ export default function RealOrCamera() {
         render(({ canvas, frameTexture }) => {
           const width = frameTexture.width();
           const height = frameTexture.height();
+          const clearPending = clearFirstExposureRequested.getBlocking();
+          let previousFrame = firstExposureImage.getBlocking();
+          if (clearPending) {
+            clearFirstExposureRequested.setBlocking(false);
+            firstExposureImage.setBlocking(null);
+            firstExposureAvailable.setBlocking(false);
+            previousFrame?.dispose();
+            previousFrame = null;
+          }
+          const firstCapture = firstExposureRequested.getBlocking();
+          const finalCapture = finalExposureRequested.getBlocking();
+          const singleCapture = captureRequested.getBlocking();
+          const mxMix = previousFrame ? liveMxMix.getBlocking() : 0;
           const screenImageShader = frameTexture.makeShaderOptions(
             TileMode.Clamp,
             TileMode.Clamp,
             FilterMode.Linear,
             MipmapMode.None,
           );
+          const previousImageShader = previousFrame
+            ? previousFrame.makeShaderOptions(
+                TileMode.Clamp,
+                TileMode.Clamp,
+                FilterMode.Linear,
+                MipmapMode.None,
+              )
+            : frameTexture.makeShaderOptions(
+                TileMode.Clamp,
+                TileMode.Clamp,
+                FilterMode.Linear,
+                MipmapMode.None,
+              );
           let screenShader: SkShader | undefined;
           let screenPaint: SkPaint | undefined;
+          let firstFrameSurface: SkSurface | null = null;
 
           try {
             const screenUniforms = [
+              previousFrame?.width() ?? width,
+              previousFrame?.height() ?? height,
+              mxMix,
               width,
               height,
               filmProfile,
               grainEnabled ? 0.35 : 0,
               halationEnabled ? 0.65 : 0,
-              vignetteEnabled ? 0.9 : 0,
               17,
+              boundedExposure,
+              vignetteEnabled ? 0.9 : 0,
             ];
             screenShader = filmEffect.makeShaderWithChildren(
               screenUniforms,
-              [screenImageShader],
+              [screenImageShader, previousImageShader],
             );
             screenPaint = Skia.Paint();
             screenPaint.setShader(screenShader);
@@ -224,12 +306,35 @@ export default function RealOrCamera() {
               screenPaint,
             );
 
-            if (captureRequested.getBlocking()) {
+            if (firstCapture) {
+              firstExposureRequested.setBlocking(false);
+              firstFrameSurface = Skia.Surface.MakeOffscreen(
+                width,
+                height,
+              );
+              if (!firstFrameSurface) {
+                throw new Error('Unable to hold the first MX exposure.');
+              }
+              firstFrameSurface
+                .getCanvas()
+                .drawRect(Skia.XYWHRect(0, 0, width, height), screenPaint);
+              firstFrameSurface.flush();
+              const firstSnapshot = firstFrameSurface.makeImageSnapshot();
+              const oldFrame = firstExposureImage.getBlocking();
+              firstExposureImage.setBlocking(firstSnapshot);
+              firstExposureAvailable.setBlocking(true);
+              liveMxMix.setBlocking(0.35);
+              if (oldFrame && oldFrame !== firstSnapshot) oldFrame.dispose();
+            }
+
+            if (singleCapture || finalCapture) {
               captureRequested.setBlocking(false);
+              finalExposureRequested.setBlocking(false);
 
               let surface: SkSurface | null = null;
               let snapshot: SkImage | undefined;
               let highResImageShader: SkShader | undefined;
+              let highResPreviousImageShader: SkShader | undefined;
               let highResShader: SkShader | undefined;
               let offscreenPaint: SkPaint | undefined;
               try {
@@ -237,14 +342,28 @@ export default function RealOrCamera() {
                   frame.orientation === 'left' || frame.orientation === 'right';
                 const outputWidth = isLandscape ? height : width;
                 const outputHeight = isLandscape ? width : height;
+                const targetRatio = getAspectRatioValue(aspectRatio);
+                let cropWidth = outputWidth;
+                let cropHeight = outputHeight;
+                if (outputWidth / outputHeight > targetRatio) {
+                  cropWidth = outputHeight * targetRatio;
+                } else {
+                  cropHeight = outputWidth / targetRatio;
+                }
+                const cropX = (outputWidth - cropWidth) / 2;
+                const cropY = (outputHeight - cropHeight) / 2;
                 const highResUniforms = [
+                  previousFrame?.width() ?? width,
+                  previousFrame?.height() ?? height,
+                  finalCapture && previousFrame ? 1 : mxMix,
                   width,
                   height,
                   filmProfile,
                   grainEnabled ? 0.35 : 0,
                   halationEnabled ? 0.65 : 0,
-                  vignetteEnabled ? 0.9 : 0,
                   17,
+                  boundedExposure,
+                  vignetteEnabled ? 0.9 : 0,
                 ];
 
                 highResImageShader = frameTexture.makeShaderOptions(
@@ -253,9 +372,22 @@ export default function RealOrCamera() {
                   FilterMode.Linear,
                   MipmapMode.None,
                 );
+                highResPreviousImageShader = previousFrame
+                  ? previousFrame.makeShaderOptions(
+                      TileMode.Clamp,
+                      TileMode.Clamp,
+                      FilterMode.Linear,
+                      MipmapMode.None,
+                    )
+                  : frameTexture.makeShaderOptions(
+                      TileMode.Clamp,
+                      TileMode.Clamp,
+                      FilterMode.Linear,
+                      MipmapMode.None,
+                    );
                 highResShader = filmEffect.makeShaderWithChildren(
                   highResUniforms,
-                  [highResImageShader],
+                  [highResImageShader, highResPreviousImageShader],
                 );
                 offscreenPaint = Skia.Paint();
                 offscreenPaint.setShader(highResShader);
@@ -302,7 +434,9 @@ export default function RealOrCamera() {
                   offscreenCanvas.restore();
                 }
 
-                snapshot = surface.makeImageSnapshot();
+                snapshot = surface.makeImageSnapshot(
+                  Skia.XYWHRect(cropX, cropY, cropWidth, cropHeight),
+                );
                 const base64Data = snapshot.encodeToBase64(ImageFormat.JPEG, 100);
                 if (!base64Data) {
                   throw new Error('Unable to encode the processed camera frame.');
@@ -315,33 +449,84 @@ export default function RealOrCamera() {
                   error instanceof Error ? error.message : 'Unable to capture photo.',
                 );
               } finally {
+                if (finalCapture) {
+                  liveMxMix.setBlocking(0);
+                  const heldFrame = firstExposureImage.getBlocking();
+                  firstExposureImage.setBlocking(null);
+                  firstExposureAvailable.setBlocking(false);
+                  heldFrame?.dispose();
+                }
                 snapshot?.dispose();
                 surface?.dispose();
                 offscreenPaint?.dispose();
                 highResShader?.dispose();
                 highResImageShader?.dispose();
+                highResPreviousImageShader?.dispose();
               }
             }
+          } catch (error: unknown) {
+            firstExposureRequested.setBlocking(false);
+            if (finalCapture) {
+              finalExposureRequested.setBlocking(false);
+              liveMxMix.setBlocking(0);
+              const heldFrame = firstExposureImage.getBlocking();
+              firstExposureImage.setBlocking(null);
+              firstExposureAvailable.setBlocking(false);
+              heldFrame?.dispose();
+            }
+            scheduleOnRN(
+              failCapture,
+              error instanceof Error
+                ? error.message
+                : 'Unable to process camera frame.',
+            );
           } finally {
             screenPaint?.dispose();
             screenShader?.dispose();
             screenImageShader.dispose();
+            previousImageShader.dispose();
+            firstFrameSurface?.dispose();
           }
         });
+      } catch (error: unknown) {
+        firstExposureRequested.setBlocking(false);
+        captureRequested.setBlocking(false);
+        finalExposureRequested.setBlocking(false);
+        scheduleOnRN(
+          failCapture,
+          error instanceof Error ? error.message : 'Unable to process camera frame.',
+        );
       } finally {
         frame.dispose();
       }
     },
     [
       captureRequested,
+      firstExposureImage,
+      firstExposureRequested,
+      finalExposureRequested,
+      clearFirstExposureRequested,
+      firstExposureAvailable,
+      liveMxMix,
+      aspectRatio,
       failCapture,
       filmEffect,
       filmProfile,
       grainEnabled,
       halationEnabled,
+      boundedExposure,
       vignetteEnabled,
       saveProcessedPhoto,
     ],
+  );
+
+  useEffect(
+    () => () => {
+      const heldFrame = firstExposureImage.getBlocking();
+      firstExposureImage.setBlocking(null);
+      heldFrame?.dispose();
+    },
+    [firstExposureImage],
   );
 
   useEffect(
@@ -386,15 +571,86 @@ export default function RealOrCamera() {
     };
   }, [hasPermission]);
 
-  const takePhoto = async () => {
+  const takePhoto = () => {
     if (!device || !hasPermission || isCapturing) return;
 
-    captureDetails.current = { filmProfile, exposure: boundedExposure };
     if (statusTimeout.current) clearTimeout(statusTimeout.current);
     setIsCapturing(true);
     setErrorMessage(null);
     setStatusMessage('Capturing high-resolution frame…');
     captureRequested.setBlocking(true);
+  };
+
+  const handleShutter = () => {
+    if (!device || !hasPermission || isCapturing) return;
+
+    if (mxMode) {
+      if (!isAwaitingSecondExposure) {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(
+          (error: unknown) => {
+            console.warn('Unable to play first MX shutter haptic feedback.', error);
+          },
+        );
+        clearFirstExposureRequested.setBlocking(true);
+        firstExposureAvailable.setBlocking(false);
+        liveMxMix.setBlocking(0);
+        firstExposureRequested.setBlocking(true);
+        setIsAwaitingSecondExposure(true);
+        setErrorMessage(null);
+        setStatusMessage('FIRST EXPOSURE HELD · REFRAME AND PRESS AGAIN');
+        return;
+      }
+
+      if (!firstExposureAvailable.getBlocking()) {
+        setStatusMessage('HOLD THE FIRST EXPOSURE · READYING MEMORY');
+        return;
+      }
+
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+        (error: unknown) => {
+          console.warn('Unable to play second MX shutter haptic feedback.', error);
+        },
+      );
+      if (statusTimeout.current) clearTimeout(statusTimeout.current);
+      setIsCapturing(true);
+      setIsAwaitingSecondExposure(false);
+      setErrorMessage(null);
+      setStatusMessage('BLENDING DOUBLE EXPOSURE…');
+      liveMxMix.setBlocking(1);
+      finalExposureRequested.setBlocking(true);
+      return;
+    }
+
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+      (error: unknown) => {
+        console.warn('Unable to play shutter haptic feedback.', error);
+      },
+    );
+    liveMxMix.setBlocking(0);
+    void takePhoto();
+  };
+
+  const selectAspectRatio = (ratio: AspectRatio) => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play aspect-ratio selection haptic feedback.', error);
+    });
+    setAspectRatio(ratio);
+  };
+
+  const toggleMxMode = () => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play MX mode haptic feedback.', error);
+    });
+    if (mxMode || isAwaitingSecondExposure) {
+      clearFirstExposureRequested.setBlocking(true);
+      firstExposureRequested.setBlocking(false);
+      finalExposureRequested.setBlocking(false);
+      firstExposureAvailable.setBlocking(false);
+      liveMxMix.setBlocking(0);
+      setIsAwaitingSecondExposure(false);
+      setStatusMessage(null);
+    }
+    setMxMode((enabled) => !enabled);
   };
 
   const updateExposureFromDrag = (pageY: number) => {
@@ -449,6 +705,11 @@ export default function RealOrCamera() {
     Math.abs(stop - boundedExposure) < Math.abs(nearest - boundedExposure)
       ? stop
       : nearest,
+  );
+  const targetRatioNum = getAspectRatioValue(aspectRatio);
+  const bladeHeightPercent = Math.max(
+    0,
+    ((1 - 0.75 / targetRatioNum) / 2) * 100,
   );
 
   if (!hasPermission) {
@@ -520,7 +781,7 @@ export default function RealOrCamera() {
           <Text style={styles.lcdReadout}>[ {24 - (photosTaken % 24)} EXP ]</Text>
           <View style={styles.lcdDivider} />
           <Text style={styles.lcdBadge}>
-            {filmProfiles.find((profile) => profile.value === filmProfile)?.label ??
+            {FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
               'FILM'}
           </Text>
           <View
@@ -545,12 +806,29 @@ export default function RealOrCamera() {
             isActive={!archiveVisible}
             allowHapticsAndSystemSoundsPlayback
             zoom={animatedZoom}
-            exposure={boundedExposure}
             constraints={[{ photoHDR: false }]}
             targetResolution={targetResolution}
             onFrame={renderFilmFrame}
             onError={(error) => setErrorMessage(error.message)}
           />
+          {bladeHeightPercent > 0 ? (
+            <>
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.matteBlade,
+                  { top: 0, height: `${bladeHeightPercent}%` },
+                ]}
+              />
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.matteBlade,
+                  { bottom: 0, height: `${bladeHeightPercent}%` },
+                ]}
+              />
+            </>
+          ) : null}
           <View pointerEvents="none" style={styles.framelineCorners}>
             <View style={[styles.framelineCorner, styles.framelineTopLeft]} />
             <View style={[styles.framelineCorner, styles.framelineTopRight]} />
@@ -628,36 +906,91 @@ export default function RealOrCamera() {
         ) : null}
         <View style={styles.controlSection}>
           <Text style={[styles.sectionLabel, styles.etchedLabel]}>FILM STOCK</Text>
-          <View style={styles.filmOptions}>
-            {filmProfiles.map((profile) => {
-              const isSelected = filmProfile === profile.value;
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.filmScroller}
+            contentContainerStyle={styles.filmOptions}
+          >
+            {FILM_STOCKS.map((stock) => {
+              const isSelected = filmProfile === stock.id;
               return (
                 <Pressable
-                  key={profile.value}
+                  key={stock.id}
                   accessibilityRole="button"
                   accessibilityState={{ selected: isSelected }}
-                  onPress={() => selectFilmProfile(profile.value)}
+                  onPress={() => selectFilmProfile(stock.id)}
                   style={({ pressed }) => [
                     styles.buttonInactive,
                     styles.filmButton,
-                    isSelected && styles.buttonActive,
+                    isSelected && styles.filmButtonActive,
                     pressed && styles.controlButtonPressed,
                   ]}
                 >
                   <Text
                     style={[
                       styles.textInactive,
-                      isSelected && styles.textActive,
+                      isSelected && styles.filmTextActive,
                       styles.filmText,
                     ]}
                   >
-                    {profile.label}
+                    {stock.name}
                   </Text>
                   {isSelected ? <View style={styles.activeIndicator} /> : null}
                 </Pressable>
               );
             })}
+          </ScrollView>
+        </View>
+        <View style={styles.captureOptions}>
+          <Text style={styles.captureOptionLabel}>MATTE</Text>
+          <View style={styles.ratioOptions}>
+            {aspectRatios.map((ratio) => {
+              const isSelected = aspectRatio === ratio;
+              return (
+                <Pressable
+                  key={ratio}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Set crop ratio ${ratio}`}
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => selectAspectRatio(ratio)}
+                  style={({ pressed }) => [
+                    styles.ratioButton,
+                    isSelected && styles.ratioButtonActive,
+                    pressed && styles.controlButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.ratioButtonText,
+                      isSelected && styles.ratioButtonTextActive,
+                    ]}
+                  >
+                    {ratio}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              isAwaitingSecondExposure
+                ? 'Cancel double exposure'
+                : `Toggle MX double exposure${mxMode ? ' on' : ' off'}`
+            }
+            accessibilityState={{ checked: mxMode }}
+            onPress={toggleMxMode}
+            style={({ pressed }) => [
+              styles.mxButton,
+              mxMode && styles.mxButtonActive,
+              pressed && styles.controlButtonPressed,
+            ]}
+          >
+            <Text style={[styles.mxButtonText, mxMode && styles.mxButtonTextActive]}>
+              {isAwaitingSecondExposure ? 'MX · 2ND' : `MX ${mxMode ? 'ON' : 'OFF'}`}
+            </Text>
+          </Pressable>
         </View>
         <View style={styles.effectOptions}>
           <Pressable
@@ -786,11 +1119,6 @@ export default function RealOrCamera() {
           accessibilityRole="button"
           disabled={isCapturing}
           onPressIn={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
-              (error: unknown) => {
-                console.warn('Unable to play shutter haptic feedback.', error);
-              },
-            );
             shutterScale.value = withSpring(0.84, {
               damping: 14,
               stiffness: 320,
@@ -802,7 +1130,7 @@ export default function RealOrCamera() {
               stiffness: 260,
             });
           }}
-          onPress={() => void takePhoto()}
+          onPress={handleShutter}
           style={[styles.shutterOuter, isCapturing && styles.shutterDisabled]}
         >
           <Animated.View
@@ -820,7 +1148,7 @@ export default function RealOrCamera() {
         <Archive
           onClose={() => setArchiveVisible(false)}
           filmStock={
-            filmProfiles.find((profile) => profile.value === filmProfile)?.label ??
+            FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
             'LEICA M COLOR'
           }
           lens={lens}
@@ -951,6 +1279,13 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#050505',
   },
+  matteBlade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 5,
+    backgroundColor: '#050505',
+  },
   framelineCorners: {
     position: 'absolute',
     top: 0,
@@ -1042,8 +1377,92 @@ const styles = StyleSheet.create({
     borderTopColor: '#38383a',
   },
   controlSection: {
+    width: '100%',
     alignItems: 'center',
     marginBottom: 8,
+  },
+  captureOptions: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingHorizontal: 2,
+  },
+  captureOptionLabel: {
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.3,
+  },
+  ratioOptions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ratioButton: {
+    minWidth: 38,
+    minHeight: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+    borderWidth: 1,
+    borderTopWidth: 1.5,
+    borderBottomWidth: 3,
+    borderTopColor: '#535357',
+    borderBottomColor: '#080808',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#252527',
+  },
+  ratioButtonActive: {
+    borderTopColor: '#ffffff',
+    borderBottomColor: '#56565a',
+    borderLeftColor: '#f5f5f7',
+    borderRightColor: '#77777b',
+    backgroundColor: '#d4d4d6',
+  },
+  ratioButtonText: {
+    color: '#c7c7cc',
+    fontSize: 9,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  ratioButtonTextActive: {
+    color: '#121212',
+  },
+  mxButton: {
+    minWidth: 54,
+    minHeight: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 7,
+    borderWidth: 1,
+    borderTopWidth: 1.5,
+    borderBottomWidth: 3,
+    borderTopColor: '#535357',
+    borderBottomColor: '#080808',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#252527',
+  },
+  mxButtonActive: {
+    borderTopColor: '#ffd27a',
+    borderBottomColor: '#6e3d00',
+    borderLeftColor: '#ff9500',
+    borderRightColor: '#6e3d00',
+    backgroundColor: '#3a2b15',
+  },
+  mxButtonText: {
+    color: '#c7c7cc',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  mxButtonTextActive: {
+    color: '#ffbf58',
   },
   sectionLabel: {
     marginBottom: 6,
@@ -1069,9 +1488,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textAlign: 'center',
   },
+  filmScroller: {
+    width: '100%',
+    flexGrow: 0,
+  },
   filmOptions: {
     flexDirection: 'row',
-    justifyContent: 'center',
+    alignItems: 'center',
     padding: 4,
     borderWidth: 1,
     borderColor: '#454547',
@@ -1104,15 +1527,26 @@ const styles = StyleSheet.create({
   },
   filmButton: {
     borderTopColor: '#f5f5f7',
-    borderBottomColor: '#77777b',
-    borderLeftColor: '#b8b8ba',
-    borderRightColor: '#77777b',
-    backgroundColor: '#c7c7cc',
+    paddingHorizontal: 9,
+    borderBottomColor: '#080808',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    backgroundColor: '#252527',
     marginHorizontal: 2,
+  },
+  filmButtonActive: {
+    backgroundColor: '#d4d4d6',
+    borderTopColor: '#ffffff',
+    borderBottomColor: '#56565a',
+    borderLeftColor: '#f5f5f7',
+    borderRightColor: '#77777b',
   },
   filmText: {
     fontSize: 9,
     letterSpacing: 0.3,
+  },
+  filmTextActive: {
+    color: '#121212',
   },
   textInactive: {
     color: '#c7c7cc',
