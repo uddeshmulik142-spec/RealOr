@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Animated, {
   interpolateColor,
   useDerivedValue,
@@ -7,14 +7,15 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import {
+  Asset,
   AssetField,
   MediaType,
   Query,
   requestPermissionsAsync,
-  type Asset,
 } from 'expo-media-library';
 import * as Haptics from 'expo-haptics';
 import {
+  AppState,
   FlatList,
   Image,
   Pressable,
@@ -24,18 +25,31 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import * as Crypto from 'expo-crypto';
+import {
+  getIpAddressAsync,
+  getNetworkStateAsync,
+  NetworkStateType,
+} from 'expo-network';
+import type { HttpServer } from 'react-native-nitro-http-server';
+import { readDevelopedPhotoMetadata } from '../utils/photoMetadata';
+import {
+  startScanningStationServer,
+  type ScanningStationPhoto,
+} from '../utils/scanningStationServer';
 
 type ArchivePhoto = {
   id: string;
   uri: string;
   createdAt: Date | null;
+  stock: string;
+  focalLength: string;
+  ev: number | null;
+  developedTimestamp: string | null;
 };
 
 type ArchiveProps = {
   onClose: () => void;
-  filmStock: string;
-  lens: string;
-  exposure: number;
 };
 
 const PHOTO_LIMIT = 300;
@@ -52,22 +66,88 @@ async function loadArchivePhotos(): Promise<ArchivePhoto[] | null> {
     .limit(PHOTO_LIMIT)
     .exe();
 
-  return Promise.all(
-    assets.map(async (asset) => {
-      const [uri, creationTime] = await Promise.all([
-        asset.getUri(),
-        asset.getCreationTime(),
-      ]);
-      return {
-        id: asset.id,
-        uri,
-        createdAt: creationTime === null ? null : new Date(creationTime * 1000),
-      };
-    }),
-  );
+  const [metadataById, loadedAssets] = await Promise.all([
+    readDevelopedPhotoMetadata(),
+    Promise.all(
+      assets.map(async (asset) => {
+        const [uri, creationTime] = await Promise.all([
+          asset.getUri(),
+          asset.getCreationTime(),
+        ]);
+        return {
+          id: asset.id,
+          uri,
+          createdAt:
+            creationTime === null ? null : new Date(creationTime * 1000),
+          creationTime,
+        };
+      }),
+    ),
+  ]);
+
+  return loadedAssets.map((asset) => {
+    const metadata = metadataById[asset.id];
+    return {
+      id: asset.id,
+      uri: asset.uri,
+      createdAt: asset.createdAt,
+      stock: metadata?.stock ?? 'UNRECORDED',
+      focalLength: metadata?.focalLength ?? 'UNRECORDED',
+      ev: metadata?.ev ?? null,
+      developedTimestamp:
+        metadata?.developedTimestamp ??
+        (asset.creationTime === null
+          ? null
+          : new Date(asset.creationTime * 1000).toISOString()),
+    };
+  });
 }
 
-function formatExposure(exposure: number): string {
+async function loadDevelopedPhotosForStation(): Promise<
+  ScanningStationPhoto[]
+> {
+  const metadata = await readDevelopedPhotoMetadata();
+  const entries = Object.entries(metadata);
+  const stationPhotos: ScanningStationPhoto[] = [];
+
+  for (let start = 0; start < entries.length; start += 10) {
+    const batch = await Promise.all(
+      entries
+        .slice(start, start + 10)
+        .map(async ([id, details]): Promise<ScanningStationPhoto | null> => {
+          try {
+            const asset = new Asset(id);
+            const uri = await asset.getUri();
+            return {
+              id,
+              uri,
+              stock: details.stock,
+              focalLength: details.focalLength,
+              ev: details.ev,
+              developedTimestamp: details.developedTimestamp,
+            };
+          } catch (error) {
+            console.warn(
+              'A developed frame could not be resolved for the scanning station.',
+              error,
+            );
+            return null;
+          }
+        }),
+    );
+
+    stationPhotos.push(
+      ...batch.filter(
+        (photo): photo is ScanningStationPhoto => photo !== null,
+      ),
+    );
+  }
+
+  return stationPhotos;
+}
+
+function formatExposure(exposure: number | null): string {
+  if (exposure === null) return 'UNRECORDED';
   return `EV ${exposure >= 0 ? '+' : ''}${exposure.toFixed(1)}`;
 }
 
@@ -93,9 +173,6 @@ function formatImprintDate(date: Date | null): string {
 
 export default function Archive({
   onClose,
-  filmStock,
-  lens,
-  exposure,
 }: ArchiveProps) {
   const { width } = useWindowDimensions();
   const [photos, setPhotos] = useState<ArchivePhoto[]>([]);
@@ -103,6 +180,18 @@ export default function Archive({
   const [isLoading, setIsLoading] = useState(true);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [stationVisible, setStationVisible] = useState(false);
+  const [stationCode, setStationCode] = useState<string | null>(null);
+  const [stationIp, setStationIp] = useState<string | null>(null);
+  const [stationPort, setStationPort] = useState<number | null>(null);
+  const [stationRunning, setStationRunning] = useState(false);
+  const [stationError, setStationError] = useState<string | null>(null);
+  const [transferRate, setTransferRate] = useState(0);
+  const [appIsActive, setAppIsActive] = useState(
+    AppState.currentState === 'active',
+  );
+  const bytesServed = useRef(0);
+  const previousBytesServed = useRef(0);
   const safelightProgress = useDerivedValue(() =>
     isLoading
       ? withRepeat(withTiming(1, { duration: 1400 }), -1, true)
@@ -114,6 +203,14 @@ export default function Archive({
       [0, 1],
       ['#050505', '#3a0505'],
     ),
+  }));
+  const stationLedProgress = useDerivedValue(() =>
+    stationRunning
+      ? withRepeat(withTiming(1, { duration: 850 }), -1, true)
+      : withTiming(0.25, { duration: 250 }),
+  );
+  const stationLedStyle = useAnimatedStyle(() => ({
+    opacity: stationLedProgress.value,
   }));
 
   const refreshPhotos = useCallback(async () => {
@@ -141,6 +238,121 @@ export default function Archive({
     }, 0);
     return () => clearTimeout(loadTimeout);
   }, [refreshPhotos]);
+
+  const generateStationCode = useCallback(async () => {
+    try {
+      const bytes = await Crypto.getRandomBytesAsync(16);
+      setStationCode(
+        Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(''),
+      );
+      setStationError(null);
+    } catch (error) {
+      console.error('Unable to generate a scanning station access code.', error);
+      setStationError('A secure session code could not be generated.');
+    }
+  }, []);
+
+  const openStation = useCallback(() => {
+    setStationVisible(true);
+    setStationIp(null);
+    setStationPort(null);
+    setStationError(null);
+    bytesServed.current = 0;
+    previousBytesServed.current = 0;
+    setTransferRate(0);
+    void generateStationCode();
+  }, [generateStationCode]);
+
+  const closeStation = useCallback(() => {
+    setStationVisible(false);
+    setStationCode(null);
+    setStationRunning(false);
+    setStationPort(null);
+  }, []);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      const active = state === 'active';
+      setAppIsActive(active);
+      if (!active) {
+        setStationRunning(false);
+        setTransferRate(0);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!stationVisible || !stationCode || !appIsActive) return;
+
+    let cancelled = false;
+    let localServer: HttpServer | null = null;
+
+    const startServer = async () => {
+      try {
+        const [network, ip] = await Promise.all([
+          getNetworkStateAsync(),
+          getIpAddressAsync(),
+        ]);
+        if (cancelled) return;
+        setStationIp(ip);
+        if (network.type !== NetworkStateType.WIFI || ip === '0.0.0.0') {
+          throw new Error(
+            'Connect Real / Or to Wi-Fi before starting the scanning station.',
+          );
+        }
+
+        const stationPhotos = await loadDevelopedPhotosForStation();
+        if (cancelled) return;
+        const result = await startScanningStationServer(
+          stationPhotos,
+          stationCode,
+          (byteCount) => {
+            bytesServed.current += byteCount;
+          },
+          ip,
+        );
+        localServer = result.server;
+        if (cancelled) {
+          await result.server.stop();
+          return;
+        }
+        setStationPort(result.port);
+        setStationRunning(true);
+      } catch (error) {
+        console.error('Unable to start the local scanning station.', error);
+        if (!cancelled) {
+          setStationError(
+            error instanceof Error
+              ? error.message
+              : 'The local scanning station could not be started.',
+          );
+        }
+      }
+    };
+    void startServer();
+
+    return () => {
+      cancelled = true;
+      if (localServer) {
+        void localServer.stop().catch((error: unknown) => {
+          console.error('Unable to stop the local scanning station.', error);
+        });
+      }
+    };
+  }, [appIsActive, stationCode, stationVisible]);
+
+  useEffect(() => {
+    if (!stationVisible || !stationRunning) return;
+
+    previousBytesServed.current = bytesServed.current;
+    const rateTimer = setInterval(() => {
+      const delta = bytesServed.current - previousBytesServed.current;
+      previousBytesServed.current = bytesServed.current;
+      setTransferRate(delta / (1024 * 1024));
+    }, 1000);
+    return () => clearInterval(rateTimer);
+  }, [stationRunning, stationVisible]);
 
   const openPhoto = useCallback((photo: ArchivePhoto) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
@@ -186,12 +398,12 @@ export default function Archive({
             {formatImprintDate(item.createdAt)}
           </Text>
           <Text numberOfLines={1} style={styles.imprintStock}>
-            {filmStock}
+            {item.stock}
           </Text>
         </View>
       </Pressable>
     ),
-    [filmStock, openPhoto, width],
+    [openPhoto, width],
   );
 
   return (
@@ -202,17 +414,30 @@ export default function Archive({
           <Text style={styles.eyebrow}>REAL / OR · DARKROOM</Text>
           <Text style={styles.title}>THE ARCHIVE</Text>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Close archive"
-          onPress={closeArchive}
-          style={({ pressed }) => [
-            styles.closeButton,
-            pressed && styles.buttonPressed,
-          ]}
-        >
-          <Text style={styles.closeButtonText}>CLOSE</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open scanning station"
+            onPress={openStation}
+            style={({ pressed }) => [
+              styles.stationLaunchButton,
+              pressed && styles.buttonPressed,
+            ]}
+          >
+            <Text style={styles.stationLaunchText}>SCANNING STATION</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close archive"
+            onPress={closeArchive}
+            style={({ pressed }) => [
+              styles.closeButton,
+              pressed && styles.buttonPressed,
+            ]}
+          >
+            <Text style={styles.closeButtonText}>CLOSE</Text>
+          </Pressable>
+        </View>
       </View>
 
       <View
@@ -271,6 +496,81 @@ export default function Archive({
         {String(photos.length).padStart(2, '0')} FRAMES · CONTACT SHEET
       </Text>
 
+      {stationVisible ? (
+        <View style={styles.stationOverlay}>
+          <View style={styles.stationPanel}>
+            <View style={styles.stationPanelHeader}>
+              <View>
+                <Text style={styles.eyebrow}>LOCAL DARKROOM LINK</Text>
+                <Text style={styles.stationTitle}>SCANNING STATION</Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close scanning station"
+                onPress={closeStation}
+                style={styles.closeButton}
+              >
+                <Text style={styles.closeButtonText}>CLOSE</Text>
+              </Pressable>
+            </View>
+            <View style={styles.stationStatusRow}>
+              <Animated.View
+                style={[
+                  styles.stationLed,
+                  stationRunning && styles.stationLedActive,
+                  stationLedStyle,
+                ]}
+              />
+              <Text style={styles.stationStatus}>
+                {stationError
+                  ? 'LOCAL TRANSMITTER UNAVAILABLE'
+                  : stationRunning
+                  ? 'LOCAL TRANSMITTER ACTIVE'
+                  : appIsActive
+                    ? 'STARTING LOCAL TRANSMITTER'
+                    : 'TRANSMITTER PAUSED · APP IN BACKGROUND'}
+              </Text>
+            </View>
+            <Text style={styles.stationReadoutLabel}>DESKTOP URL</Text>
+            <Text selectable style={styles.stationReadout}>
+              {stationRunning && stationIp && stationIp !== '0.0.0.0'
+                ? `http://${stationIp}:${stationPort}`
+                : 'Connect this device to Wi-Fi to resolve its address'}
+            </Text>
+            <Text style={styles.stationReadoutLabel}>SESSION ACCESS CODE</Text>
+            <Text selectable style={styles.stationCode}>
+              {stationCode ?? 'GENERATING SECURE CODE…'}
+            </Text>
+            <View style={styles.transferReadout}>
+              <Text style={styles.stationReadoutLabel}>OUTBOUND TRANSFER</Text>
+              <Text style={styles.transferRate}>
+                {transferRate.toFixed(2)} MB / SEC
+              </Text>
+            </View>
+            {stationError ? (
+              <Text accessibilityRole="alert" style={styles.stationError}>
+                {stationError}
+              </Text>
+            ) : null}
+            <Text style={styles.stationHint}>
+              Enter the URL on a device connected to the same trusted Wi-Fi
+              network, then unlock with this session code. The transmitter
+              stops when closed or when Real / Or enters the background. Only
+              Real / Or captures with saved metadata are shared.
+            </Text>
+            {stationError ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => void generateStationCode()}
+                style={styles.retryButton}
+              >
+                <Text style={styles.retryButtonText}>RETRY SESSION</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
       {selectedPhoto ? (
         <View style={styles.loupe}>
           <View style={styles.loupeHeader}>
@@ -297,12 +597,19 @@ export default function Archive({
           <View style={styles.metadataPlate}>
             <Text style={styles.plateTitle}>DEVELOPED FRAME</Text>
             <View style={styles.plateRule} />
-            <MetadataRow label="STOCK" value={filmStock} />
-            <MetadataRow label="LENS" value={`35mm f/1.4 (${lens})`} />
-            <MetadataRow label="EXPOSURE" value={formatExposure(exposure)} />
+            <MetadataRow label="STOCK" value={selectedPhoto.stock} />
+            <MetadataRow label="LENS" value={selectedPhoto.focalLength} />
+            <MetadataRow
+              label="EXPOSURE"
+              value={formatExposure(selectedPhoto.ev)}
+            />
             <MetadataRow
               label="DEVELOPED"
-              value={formatDevelopedDate(selectedPhoto.createdAt)}
+              value={formatDevelopedDate(
+                selectedPhoto.developedTimestamp
+                  ? new Date(selectedPhoto.developedTimestamp)
+                  : selectedPhoto.createdAt,
+              )}
             />
             <Pressable
               accessibilityRole="button"
@@ -347,6 +654,28 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  stationLaunchButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    backgroundColor: '#29261e',
+    borderColor: '#6c572e',
+    borderWidth: 1,
+    borderBottomWidth: 3,
+    borderBottomColor: '#13120f',
+    borderRadius: 5,
+  },
+  stationLaunchText: {
+    color: '#f0b64c',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
   eyebrow: {
     color: '#8e8e93',
     fontSize: 10,
@@ -378,6 +707,115 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 1.5,
+  },
+  stationOverlay: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 5,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 18,
+    backgroundColor: 'rgba(0, 0, 0, 0.88)',
+  },
+  stationPanel: {
+    width: '100%',
+    maxWidth: 480,
+    padding: 20,
+    backgroundColor: '#121210',
+    borderWidth: 1,
+    borderColor: '#62563d',
+    borderTopColor: '#aa9567',
+    borderBottomWidth: 4,
+    borderBottomColor: '#050505',
+    borderRadius: 7,
+  },
+  stationPanelHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 20,
+  },
+  stationTitle: {
+    color: '#f0ede4',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 2,
+    marginTop: 5,
+  },
+  stationStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#292923',
+    marginBottom: 16,
+  },
+  stationLed: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#382c20',
+  },
+  stationLedActive: {
+    backgroundColor: '#40d26c',
+    shadowColor: '#40d26c',
+    shadowOpacity: 0.8,
+    shadowRadius: 7,
+    elevation: 5,
+  },
+  stationStatus: {
+    flexShrink: 1,
+    color: '#a8a79e',
+    fontFamily: 'Menlo',
+    fontSize: 10,
+    letterSpacing: 1,
+  },
+  stationReadoutLabel: {
+    color: '#858176',
+    fontFamily: 'Menlo',
+    fontSize: 9,
+    letterSpacing: 1.5,
+    marginTop: 12,
+  },
+  stationReadout: {
+    color: '#efc46c',
+    fontFamily: 'Menlo',
+    fontSize: 13,
+    marginTop: 6,
+  },
+  stationCode: {
+    color: '#f2eee3',
+    fontFamily: 'Menlo',
+    fontSize: 16,
+    letterSpacing: 1,
+    marginTop: 7,
+  },
+  transferReadout: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    marginTop: 5,
+  },
+  transferRate: {
+    color: '#65d98b',
+    fontFamily: 'Menlo',
+    fontSize: 12,
+    marginTop: 12,
+  },
+  stationError: {
+    color: '#ff6961',
+    fontFamily: 'Menlo',
+    fontSize: 10,
+    marginTop: 12,
+  },
+  stationHint: {
+    color: '#96948c',
+    fontFamily: 'Menlo',
+    fontSize: 10,
+    lineHeight: 16,
+    marginTop: 18,
   },
   contactSheet: {
     flex: 1,

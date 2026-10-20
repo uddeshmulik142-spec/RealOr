@@ -33,6 +33,8 @@ import {
   MipmapMode,
   Skia,
   TileMode,
+  AlphaType,
+  ColorType,
   type SkPaint,
   type SkShader,
   type SkImage,
@@ -70,6 +72,12 @@ const FILM_DX_COLORS: Record<FilmProfile, { backgroundColor: string; textColor: 
   8: { backgroundColor: '#dc7942', textColor: '#17100c' },
 };
 const exposureStops = [-2, -1, 0, 1, 2] as const;
+const PUSH_PULL_STOPS = [
+  { value: -1, label: '-1' },
+  { value: 0, label: 'BOX' },
+  { value: 1, label: '+1' },
+  { value: 2, label: '+2' },
+] as const;
 const aspectRatios = ['3:4', '6:7', '1:1', '16:9'] as const;
 type AspectRatio = (typeof aspectRatios)[number];
 
@@ -85,6 +93,35 @@ function getAspectRatioValue(ratio: AspectRatio): number {
       return 16 / 9;
     default:
       return 3 / 4;
+  }
+}
+
+function getZoneReadout(zone: number): string {
+  'worklet';
+
+  switch (zone) {
+    case 0:
+      return 'ZONE 0 (PURE BLACK)';
+    case 1:
+      return 'ZONE I';
+    case 2:
+      return 'ZONE II';
+    case 3:
+      return 'ZONE III (SHADOW DETAIL)';
+    case 4:
+      return 'ZONE IV';
+    case 5:
+      return 'ZONE V (MIDTONE)';
+    case 6:
+      return 'ZONE VI';
+    case 7:
+      return 'ZONE VII';
+    case 8:
+      return 'ZONE VIII (HIGHLIGHT)';
+    case 9:
+      return 'ZONE IX';
+    default:
+      return 'ZONE X (PURE WHITE)';
   }
 }
 
@@ -139,8 +176,8 @@ export default function RealOrCamera() {
   const [zoom, setZoom] = useState(zoom1x);
   const animatedZoom = useSharedValue(zoom);
   const shutterScale = useSharedValue(1);
-  const [isShutterArmed, setIsShutterArmed] = useState(true);
-  const isShutterArmedRef = useRef(true);
+  const [isWound, setIsWound] = useState(true);
+  const isWoundRef = useRef(true);
   const leverProgress = useSharedValue(0);
   const [leverTrackWidth, setLeverTrackWidth] = useState(0);
   const leverTrackWidthRef = useRef(0);
@@ -191,6 +228,10 @@ export default function RealOrCamera() {
     () => createSynchronizable(0),
     [],
   );
+  const meterSampleRequested = React.useMemo(
+    () => createSynchronizable(false, { fixedType: true }),
+    [],
+  );
   const filmEffect = React.useMemo(() => createFilmRuntimeEffect(), []);
   const targetResolution = React.useMemo(() => {
     const resolutions = device?.getSupportedResolutions('stream') ?? [];
@@ -212,6 +253,19 @@ export default function RealOrCamera() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [filmProfile, setFilmProfile] = useState<FilmProfile>(0);
+  const [pushPull, setPushPull] = useState(0);
+  const [manualFocusActive, setManualFocusActive] = useState(false);
+  const [focusDistance, setFocusDistance] = useState(0.5);
+  const focusDistanceRef = useRef(0.5);
+  const focusStartValue = useRef(0.5);
+  const focusSliderWidth = useRef(0);
+  const focusLastHapticValue = useRef(0.5);
+  const [meterPoint, setMeterPoint] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [activeZoneLabel, setActiveZoneLabel] = useState('--');
+  const activeZone = useSharedValue<string>('--');
+  const viewfinderSize = useRef({ width: 0, height: 0 });
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('3:4');
   const [mxMode, setMxMode] = useState(false);
   const [isAwaitingSecondExposure, setIsAwaitingSecondExposure] =
@@ -241,28 +295,47 @@ export default function RealOrCamera() {
     animatedZoom.value = withTiming(zoom, { duration: 350 });
   }, [animatedZoom, device, zoom, zoom1x]);
 
-  const saveProcessedPhoto = React.useCallback(async (base64Data: string) => {
-    try {
-      const savedPhotoUri = await saveEncodedPhotoToLibrary(base64Data);
-      setLatestPhotoUri(savedPhotoUri);
-      setPhotosTaken((count) => count + 1);
-      setStatusMessage('Saved to camera roll');
-      statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
-    } catch (error: unknown) {
-      setStatusMessage(null);
-      setErrorMessage(
-        error instanceof Error ? error.message : 'Unable to save photo.',
-      );
-    } finally {
-      setIsCapturing(false);
-    }
-  }, []);
+  const saveProcessedPhoto = React.useCallback(
+    async (base64Data: string) => {
+      try {
+        const savedPhotoUri = await saveEncodedPhotoToLibrary(base64Data, {
+          stock:
+            FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
+            String(filmProfile),
+          focalLength: lens,
+          ev: boundedExposure,
+          developedTimestamp: new Date().toISOString(),
+        });
+        setLatestPhotoUri(savedPhotoUri);
+        setPhotosTaken((count) => count + 1);
+        isWoundRef.current = false;
+        setIsWound(false);
+        setStatusMessage('Saved to camera roll');
+        statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
+      } catch (error: unknown) {
+        setStatusMessage(null);
+        setErrorMessage(
+          error instanceof Error ? error.message : 'Unable to save photo.',
+        );
+      } finally {
+        setIsCapturing(false);
+      }
+    },
+    [boundedExposure, filmProfile, lens],
+  );
 
   const failCapture = React.useCallback((message: string) => {
     setStatusMessage(null);
     setErrorMessage(message);
     setIsCapturing(false);
     setIsAwaitingSecondExposure(false);
+  }, []);
+
+  const setMeterReadout = React.useCallback((readout: string) => {
+    setActiveZoneLabel(readout);
+    if (readout === 'METER ERROR') {
+      setStatusMessage('SPOT METER SAMPLE UNAVAILABLE');
+    }
   }, []);
 
   const renderFilmFrame = React.useCallback<SkiaCameraProps['onFrame']>(
@@ -274,6 +347,47 @@ export default function RealOrCamera() {
           const width = frameTexture.width();
           const height = frameTexture.height();
           const dynamicSeed = (frame.timestamp / 1000) % 10000;
+          if (meterSampleRequested.getBlocking() && meterPoint) {
+            meterSampleRequested.setBlocking(false);
+            const sampleX = Math.min(
+              width - 1,
+              Math.max(0, Math.floor(meterPoint.x * width)),
+            );
+            const sampleY = Math.min(
+              height - 1,
+              Math.max(0, Math.floor(meterPoint.y * height)),
+            );
+            try {
+              const meterPixel = frameTexture.readPixels(sampleX, sampleY, {
+                alphaType: AlphaType.Unpremul,
+                colorType: ColorType.RGBA_8888,
+                width: 1,
+                height: 1,
+              });
+              if (!meterPixel || meterPixel.length < 3) {
+                activeZone.value = 'METER ERROR';
+                scheduleOnRN(setMeterReadout, 'METER ERROR');
+              } else {
+                const red = Math.pow(meterPixel[0] / 255, 2.2);
+                const green = Math.pow(meterPixel[1] / 255, 2.2);
+                const blue = Math.pow(meterPixel[2] / 255, 2.2);
+                const luminance =
+                  0.2126 * red + 0.7152 * green + 0.0722 * blue;
+                const zone = Math.min(
+                  10,
+                  Math.max(0, Math.round(luminance * 10)),
+                );
+                const zoneReadout = getZoneReadout(zone);
+                activeZone.value = zoneReadout;
+                scheduleOnRN(setMeterReadout, zoneReadout);
+              }
+            } catch (error: unknown) {
+              meterSampleRequested.setBlocking(false);
+              activeZone.value = 'METER ERROR';
+              console.warn('Unable to read the spot-meter pixel.', error);
+              scheduleOnRN(setMeterReadout, 'METER ERROR');
+            }
+          }
           const clearPending = clearFirstExposureRequested.getBlocking();
           let previousFrame = firstExposureImage.getBlocking();
           if (clearPending) {
@@ -323,6 +437,11 @@ export default function RealOrCamera() {
               dynamicSeed,
               boundedExposure,
               vignetteEnabled ? 0.9 : 0,
+              manualFocusActive ? 1.0 : 0.0,
+              focusDistance,
+              meterPoint ? meterPoint.x * width : 0,
+              meterPoint ? meterPoint.y * height : 0,
+              pushPull,
             ];
             screenShader = filmEffect.makeShaderWithChildren(
               screenUniforms,
@@ -393,6 +512,11 @@ export default function RealOrCamera() {
                   dynamicSeed,
                   boundedExposure,
                   vignetteEnabled ? 0.9 : 0,
+                  manualFocusActive ? 1.0 : 0.0,
+                  focusDistance,
+                  meterPoint ? meterPoint.x * width : 0,
+                  meterPoint ? meterPoint.y * height : 0,
+                  pushPull,
                 ];
 
                 highResImageShader = frameTexture.makeShaderOptions(
@@ -542,6 +666,13 @@ export default function RealOrCamera() {
       halationEnabled,
       boundedExposure,
       vignetteEnabled,
+      manualFocusActive,
+      focusDistance,
+      meterPoint,
+      meterSampleRequested,
+      activeZone,
+      setMeterReadout,
+      pushPull,
       saveProcessedPhoto,
     ],
   );
@@ -598,7 +729,7 @@ export default function RealOrCamera() {
   }, [hasPermission]);
 
   const takePhoto = () => {
-    if (!device || !hasPermission || isCapturing) return;
+    if (!device || !hasPermission || isCapturing || !isWoundRef.current) return;
 
     if (statusTimeout.current) clearTimeout(statusTimeout.current);
     setIsCapturing(true);
@@ -607,42 +738,24 @@ export default function RealOrCamera() {
     captureRequested.setBlocking(true);
   };
 
-  const disarmShutter = () => {
-    isShutterArmedRef.current = false;
-    setIsShutterArmed(false);
+  const advanceFilm = React.useCallback(() => {
+    if (isWoundRef.current) return;
+    isWoundRef.current = true;
+    setIsWound(true);
+    leverProgress.value = withSpring(0, { damping: 14, stiffness: 180 });
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch(
       (error: unknown) => {
-        console.warn('Unable to play shutter advance clunk.', error);
+        console.warn('Unable to play film-advance ratchet feedback.', error);
       },
     );
-  };
-
-  const playAdvanceRatchet = React.useCallback(async () => {
-    for (let index = 0; index < 3; index += 1) {
-      try {
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      } catch (error: unknown) {
-        console.warn('Unable to play film-advance ratchet feedback.', error);
-        return;
-      }
-      if (index < 2) await new Promise<void>((resolve) => setTimeout(resolve, 55));
-    }
-  }, []);
-
-  const advanceFilm = React.useCallback(() => {
-    if (isShutterArmedRef.current) return;
-    isShutterArmedRef.current = true;
-    setIsShutterArmed(true);
-    leverProgress.value = withSpring(0, { damping: 14, stiffness: 180 });
-    void playAdvanceRatchet();
-  }, [leverProgress, playAdvanceRatchet]);
+  }, [leverProgress]);
 
   const filmAdvancePanResponder = React.useMemo(
     () =>
       PanResponder.create({
-        onStartShouldSetPanResponder: () => !isShutterArmedRef.current,
+        onStartShouldSetPanResponder: () => false,
         onMoveShouldSetPanResponder: (_, gestureState) =>
-          !isShutterArmedRef.current &&
+          !isWoundRef.current &&
           gestureState.dx > 8 &&
           Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
         onPanResponderGrant: () => {
@@ -678,13 +791,13 @@ export default function RealOrCamera() {
   );
 
   const handleShutter = () => {
-    if (!device || !hasPermission || isCapturing || !isShutterArmed) return;
+    if (!device || !hasPermission || isCapturing || !isWoundRef.current) return;
 
     if (mxMode) {
       if (!isAwaitingSecondExposure) {
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
           (error: unknown) => {
-            console.warn('Unable to play first MX shutter haptic feedback.', error);
+            console.warn('Unable to play MX shutter haptic feedback.', error);
           },
         );
         clearFirstExposureRequested.setBlocking(true);
@@ -702,7 +815,11 @@ export default function RealOrCamera() {
         return;
       }
 
-      disarmShutter();
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+        (error: unknown) => {
+          console.warn('Unable to play final MX shutter haptic feedback.', error);
+        },
+      );
       if (statusTimeout.current) clearTimeout(statusTimeout.current);
       setIsCapturing(true);
       setIsAwaitingSecondExposure(false);
@@ -713,7 +830,11 @@ export default function RealOrCamera() {
       return;
     }
 
-    disarmShutter();
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+      (error: unknown) => {
+        console.warn('Unable to play shutter haptic feedback.', error);
+      },
+    );
     liveMxMix.setBlocking(0);
     void takePhoto();
   };
@@ -780,6 +901,44 @@ export default function RealOrCamera() {
     lastHapticEV.current = newEV;
     setExposure(newEV);
   };
+  const updateFocusDistance = React.useCallback((value: number) => {
+    const nextFocusDistance = Math.min(1, Math.max(0, value));
+    focusDistanceRef.current = nextFocusDistance;
+    setFocusDistance(nextFocusDistance);
+
+    if (Math.abs(nextFocusDistance - focusLastHapticValue.current) >= 0.05) {
+      focusLastHapticValue.current = nextFocusDistance;
+      void Haptics.selectionAsync().catch((error: unknown) => {
+        console.warn('Unable to play manual-focus detent feedback.', error);
+      });
+    }
+  }, []);
+  const focusPanResponder = React.useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => manualFocusActive,
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          manualFocusActive &&
+          Math.abs(gestureState.dx) > 4 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onPanResponderGrant: () => {
+          focusStartValue.current = focusDistanceRef.current;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const rangeWidth = Math.max(1, focusSliderWidth.current);
+          updateFocusDistance(
+            focusStartValue.current + gestureState.dx / rangeWidth,
+          );
+        },
+      }),
+    [manualFocusActive, updateFocusDistance],
+  );
+  const toggleManualFocus = () => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play focus mode selection feedback.', error);
+    });
+    setManualFocusActive((active) => !active);
+  };
   const selectLens = (lensOption: typeof lens) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch((error: unknown) => {
       console.warn('Unable to play lens selection haptic feedback.', error);
@@ -792,6 +951,14 @@ export default function RealOrCamera() {
       console.warn('Unable to play film selection haptic feedback.', error);
     });
     setFilmProfile(profile);
+  };
+  const selectPushPull = (value: number) => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch(
+      (error: unknown) => {
+        console.warn('Unable to play development dial haptic feedback.', error);
+      },
+    );
+    setPushPull(value);
   };
   const toggleEffect = (
     setEnabled: (update: (enabled: boolean) => boolean) => void,
@@ -879,7 +1046,7 @@ export default function RealOrCamera() {
         </View>
         <View style={styles.lcdPanel}>
           <Text style={styles.lcdReadout}>
-            {isShutterArmed ? `[ ${24 - (photosTaken % 24)} EXP ]` : '[ UNWOUND ]'}
+            {isWound ? `[ ${24 - (photosTaken % 24)} EXP ]` : '[ UNWOUND ]'}
           </Text>
           <View style={styles.lcdDivider} />
           <View
@@ -908,11 +1075,26 @@ export default function RealOrCamera() {
           <Text style={styles.lcdReadout}>
             EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
           </Text>
+          <Animated.Text
+            accessibilityLabel={`Spot meter ${activeZoneLabel}`}
+            numberOfLines={1}
+            style={styles.zoneReadout}
+          >
+            {activeZoneLabel}
+          </Animated.Text>
         </View>
       </View>
 
       <View style={styles.viewfinderContainer}>
-        <View style={styles.viewfinder}>
+        <View
+          style={styles.viewfinder}
+          onLayout={(event) => {
+            viewfinderSize.current = {
+              width: event.nativeEvent.layout.width,
+              height: event.nativeEvent.layout.height,
+            };
+          }}
+        >
           <SkiaCamera
             style={StyleSheet.absoluteFill}
             device={device}
@@ -923,6 +1105,32 @@ export default function RealOrCamera() {
             targetResolution={targetResolution}
             onFrame={renderFilmFrame}
             onError={(error) => setErrorMessage(error.message)}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Spot meter; tap to sample the scene"
+            onPress={(event) => {
+              const { width, height } = viewfinderSize.current;
+              if (width <= 0 || height <= 0) return;
+              const x = Math.min(
+                0.999,
+                Math.max(0.001, event.nativeEvent.locationX / width),
+              );
+              const y = Math.min(
+                0.999,
+                Math.max(0.001, event.nativeEvent.locationY / height),
+              );
+              setMeterPoint({ x, y });
+              setActiveZoneLabel('METERING…');
+              activeZone.value = 'METERING…';
+              meterSampleRequested.setBlocking(true);
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                (error: unknown) => {
+                  console.warn('Unable to play spot-meter haptic feedback.', error);
+                },
+              );
+            }}
+            style={StyleSheet.absoluteFill}
           />
           {bladeHeightPercent > 0 ? (
             <>
@@ -1000,7 +1208,11 @@ export default function RealOrCamera() {
             </View>
           </View>
           <View pointerEvents="none" style={styles.viewfinderBottomLine}>
-            <Text style={styles.viewfinderLabel}>AF · AE LOCK</Text>
+            <Text style={styles.viewfinderLabel}>
+              {manualFocusActive
+                ? `MF · ${focusDistance.toFixed(2)}`
+                : 'AF · AE LOCK'}
+            </Text>
             <Text style={styles.viewfinderLabel}>{lens}</Text>
           </View>
         </View>
@@ -1054,6 +1266,110 @@ export default function RealOrCamera() {
               );
             })}
           </ScrollView>
+        </View>
+        <View style={styles.developmentRow}>
+          <Text style={[styles.sectionLabel, styles.etchedLabel]}>
+            DEVELOPMENT
+          </Text>
+          <View style={styles.developmentSelector}>
+            {PUSH_PULL_STOPS.map((stop) => {
+              const isSelected = pushPull === stop.value;
+              return (
+                <Pressable
+                  key={stop.value}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    stop.value === -1
+                      ? 'Pull one stop'
+                      : stop.value === 0
+                        ? 'Box speed, normal development'
+                        : `Push ${stop.value} stop${stop.value > 1 ? 's' : ''}`
+                  }
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => selectPushPull(stop.value)}
+                  style={({ pressed }) => [
+                    styles.developmentButton,
+                    isSelected && styles.developmentButtonActive,
+                    pressed && styles.controlButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.developmentButtonText,
+                      isSelected && styles.developmentButtonTextActive,
+                    ]}
+                  >
+                    {stop.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+        <View style={styles.focusControlSection}>
+          <View style={styles.focusControlHeader}>
+            <Text style={[styles.sectionLabel, styles.etchedLabel]}>
+              LENS FOCUS RING
+            </Text>
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityLabel={`Manual focus ${manualFocusActive ? 'on' : 'off'}`}
+              accessibilityState={{ checked: manualFocusActive }}
+              onPress={toggleManualFocus}
+              style={({ pressed }) => [
+                styles.focusModeButton,
+                manualFocusActive && styles.focusModeButtonActive,
+                pressed && styles.controlButtonPressed,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.focusModeText,
+                  manualFocusActive && styles.focusModeTextActive,
+                ]}
+              >
+                FOCUS: {manualFocusActive ? 'MAN' : 'AUTO'}
+              </Text>
+            </Pressable>
+          </View>
+          {manualFocusActive ? (
+            <View style={styles.focusSliderRow}>
+              <Text style={styles.focusEndpoint}>MACRO</Text>
+              <View
+                accessible
+                accessibilityRole="adjustable"
+                accessibilityLabel="Manual focus distance"
+                accessibilityValue={{
+                  min: 0,
+                  max: 1,
+                  now: focusDistance,
+                  text: focusDistance.toFixed(2),
+                }}
+                onLayout={(event) => {
+                  focusSliderWidth.current = event.nativeEvent.layout.width;
+                }}
+                style={styles.focusSliderTrack}
+                {...focusPanResponder.panHandlers}
+              >
+                <View pointerEvents="none" style={styles.focusSliderGroove} />
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.focusSliderFill,
+                    { width: `${focusDistance * 100}%` },
+                  ]}
+                />
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.focusSliderThumb,
+                    { left: `${focusDistance * 100}%` },
+                  ]}
+                />
+              </View>
+              <Text style={styles.focusEndpoint}>∞</Text>
+            </View>
+          ) : null}
         </View>
         <View style={styles.captureOptions}>
           <Text style={styles.captureOptionLabel}>MATTE</Text>
@@ -1231,9 +1547,9 @@ export default function RealOrCamera() {
           <View
             accessible
             accessibilityLabel={
-              isShutterArmed
+              isWound
                 ? 'Film advanced, shutter ready'
-                : 'Swipe right to advance film and arm shutter'
+                : 'Swipe right to advance film and wind shutter'
             }
             accessibilityRole="button"
             onAccessibilityTap={advanceFilm}
@@ -1250,24 +1566,29 @@ export default function RealOrCamera() {
               pointerEvents="none"
               style={[
                 styles.advanceThumb,
-                isShutterArmed && styles.advanceThumbReady,
+                isWound && styles.advanceThumbReady,
                 leverAnimatedStyle,
               ]}
             />
             <Text pointerEvents="none" style={styles.advanceTrackLabel}>
-              {isShutterArmed ? 'READY' : 'SWIPE  →'}
+              {isWound ? '[ READY ]' : 'SWIPE  →'}
             </Text>
           </View>
         </View>
         <View style={styles.shutterDeck}>
           <Text style={[styles.meterLabel, styles.etchedLabel]}>
-            {isShutterArmed ? 'BULB' : '[ UNWOUND ]'}
+            {isWound ? 'BULB' : '[ UNWOUND ]'}
           </Text>
           <Pressable
             accessibilityLabel="Take photo"
             accessibilityRole="button"
-            disabled={isCapturing || !isShutterArmed}
+            disabled={isCapturing || !isWound}
             onPressIn={() => {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                (error: unknown) => {
+                  console.warn('Unable to play half-press haptic feedback.', error);
+                },
+              );
               shutterScale.value = withSpring(0.84, {
                 damping: 14,
                 stiffness: 320,
@@ -1282,7 +1603,7 @@ export default function RealOrCamera() {
             onPress={handleShutter}
             style={[
               styles.shutterOuter,
-              (isCapturing || !isShutterArmed) && styles.shutterDisabled,
+              (isCapturing || !isWound) && styles.shutterDisabled,
             ]}
           >
             <Animated.View
@@ -1300,12 +1621,6 @@ export default function RealOrCamera() {
       >
         <Archive
           onClose={() => setArchiveVisible(false)}
-          filmStock={
-            FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
-            'LEICA M COLOR'
-          }
-          lens={lens}
-          exposure={boundedExposure}
         />
       </Modal>
     </View>
@@ -1383,6 +1698,15 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontVariant: ['tabular-nums'],
     letterSpacing: 0.5,
+  },
+  zoneReadout: {
+    maxWidth: 92,
+    flexShrink: 1,
+    color: '#d4af37',
+    fontSize: 6,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.25,
   },
   lcdDivider: {
     width: 1,
@@ -1548,6 +1872,161 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
     marginBottom: 8,
+  },
+  developmentRow: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 7,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderTopColor: '#454547',
+    borderLeftColor: '#333336',
+    borderRightColor: '#080808',
+    borderBottomColor: '#080808',
+    borderRadius: 5,
+    backgroundColor: '#151516',
+  },
+  developmentSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: '#090909',
+    borderRadius: 5,
+    backgroundColor: '#101011',
+  },
+  developmentButton: {
+    minWidth: 39,
+    minHeight: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    borderWidth: 1,
+    borderTopColor: '#4d4d50',
+    borderLeftColor: '#39393c',
+    borderRightColor: '#080808',
+    borderBottomWidth: 3,
+    borderBottomColor: '#080808',
+    borderRadius: 3,
+    backgroundColor: '#252527',
+  },
+  developmentButtonActive: {
+    borderTopColor: '#fff0b3',
+    borderLeftColor: '#d4af37',
+    borderRightColor: '#665019',
+    borderBottomColor: '#4c3a12',
+    backgroundColor: '#8a6b24',
+  },
+  developmentButtonText: {
+    color: '#a7a7ad',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  developmentButtonTextActive: {
+    color: '#fff7dd',
+  },
+  focusControlSection: {
+    width: '100%',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 7,
+    borderWidth: 1,
+    borderTopColor: '#454547',
+    borderLeftColor: '#333336',
+    borderRightColor: '#080808',
+    borderBottomColor: '#080808',
+    borderRadius: 5,
+    backgroundColor: '#151516',
+  },
+  focusControlHeader: {
+    minHeight: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  focusModeButton: {
+    minWidth: 86,
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 9,
+    borderWidth: 1,
+    borderTopColor: '#525256',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    borderBottomWidth: 3,
+    borderBottomColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#252527',
+  },
+  focusModeButtonActive: {
+    borderTopColor: '#e5ca8a',
+    borderLeftColor: '#b89042',
+    backgroundColor: '#3b301e',
+  },
+  focusModeText: {
+    color: '#a7a7ad',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+  },
+  focusModeTextActive: {
+    color: '#d4af37',
+  },
+  focusSliderRow: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 2,
+  },
+  focusEndpoint: {
+    width: 36,
+    color: '#8e8e93',
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  focusSliderTrack: {
+    flex: 1,
+    height: 30,
+    justifyContent: 'center',
+  },
+  focusSliderGroove: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 6,
+    borderWidth: 1,
+    borderColor: '#080808',
+    borderRadius: 3,
+    backgroundColor: '#3a3a3c',
+  },
+  focusSliderFill: {
+    position: 'absolute',
+    left: 0,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#8a6b24',
+  },
+  focusSliderThumb: {
+    position: 'absolute',
+    width: 20,
+    height: 26,
+    marginLeft: -10,
+    borderWidth: 1,
+    borderTopColor: '#f2dc9b',
+    borderLeftColor: '#c9a347',
+    borderRightColor: '#3f3217',
+    borderBottomWidth: 3,
+    borderBottomColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#a8842f',
+    elevation: 3,
   },
   captureOptions: {
     minHeight: 36,

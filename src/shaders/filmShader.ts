@@ -23,6 +23,10 @@ uniform float u_halation;
 uniform float u_seed;
 uniform float u_exposure;
 uniform float u_vignette;
+uniform float u_manualFocus;
+uniform float u_focusDistance;
+uniform float2 u_meterPoint;
+uniform float u_pushPull;
 
 float hash(float2 p) {
   p = fract(p * float2(443.897, 441.423));
@@ -93,6 +97,30 @@ half4 main(float2 xy) {
     linearRGB += float3(1.0, 0.22, 0.02) * halationMask * 0.45;
   }
 
+  if (u_manualFocus > 0.5) {
+    float2 focusCenter = u_resolution * 0.5;
+    float focusPatchDistance = distance(xy, focusCenter);
+    float focusPatchRadius = 65.0;
+
+    if (focusPatchDistance < focusPatchRadius) {
+      float splitOffset = (u_focusDistance - 0.5) * 24.0;
+      float splitDirection = xy.y < focusCenter.y ? 1.0 : -1.0;
+      float2 splitCoord = xy + float2(splitDirection * splitOffset, 0.0);
+      float3 splitSample = toLinear(image.eval(splitCoord).rgb);
+      linearRGB = mix(linearRGB, splitSample, 0.85);
+
+      if (focusPatchDistance > 63.0 && focusPatchDistance < 65.0) {
+        linearRGB += float3(0.9, 0.7, 0.2) * 0.4;
+      }
+    }
+  }
+
+  float contrastModifier = 1.0 + (u_pushPull * 0.15);
+  linearRGB = max(
+    (linearRGB - float3(0.18)) * contrastModifier + float3(0.18),
+    float3(0.0)
+  );
+
   float3 graded = linearRGB;
 
   if (u_profile < 0.5) {
@@ -157,7 +185,8 @@ half4 main(float2 xy) {
     displayRGB *= mix(1.0 - (u_vignette * 0.35), 1.0, vig);
   }
 
-  float grainAmount = u_grain;
+  float grainAmount =
+    u_grain * (1.0 + max(0.0, u_pushPull * 0.6));
   if (u_profile > 4.5 && u_profile < 5.5) grainAmount *= 1.6;
   if (u_profile > 2.5 && u_profile < 3.5) grainAmount *= 1.3;
 
@@ -175,6 +204,23 @@ half4 main(float2 xy) {
     displayRGB.r += n * 1.05;
     displayRGB.g += n * 0.95;
     displayRGB.b += n * 1.10;
+  }
+
+  if (u_meterPoint.x > 0.0 && u_meterPoint.y > 0.0) {
+    float2 meterOffset = xy - u_meterPoint;
+    float meterDistance = length(meterOffset);
+    float meterAbsX = abs(meterOffset.x);
+    float meterAbsY = abs(meterOffset.y);
+    bool meterRing = abs(meterDistance - 5.0) < 1.0;
+    bool meterCrosshair =
+      (meterAbsY < 0.8 && meterAbsX > 7.0 && meterAbsX < 13.0) ||
+      (meterAbsX < 0.8 && meterAbsY > 7.0 && meterAbsY < 13.0);
+    if (meterRing || meterCrosshair) {
+      float meterLuma = dot(displayRGB, float3(0.2126, 0.7152, 0.0722));
+      float3 meterColor =
+        meterLuma > 0.5 ? float3(0.02) : float3(1.0, 0.7, 0.0);
+      displayRGB = mix(displayRGB, meterColor, 0.95);
+    }
   }
 
   return half4(clamp(displayRGB, 0.0, 1.0), 1.0);
