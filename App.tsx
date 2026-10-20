@@ -39,6 +39,7 @@ import {
 import { createSynchronizable, scheduleOnRN } from 'react-native-worklets';
 import { saveEncodedPhotoToLibrary } from './src/utils/saveEncodedPhotoToLibrary';
 import { getLatestPhotoUri } from './src/utils/getLatestPhotoUri';
+import Archive from './src/screens/Archive';
 import {
   createFilmRuntimeEffect,
   type FilmProfile,
@@ -50,12 +51,6 @@ const filmProfiles: { label: string; value: FilmProfile }[] = [
   { label: 'LEICA M', value: 2 },
 ];
 const exposureStops = [-2, -1, 0, 1, 2] as const;
-type CapturedPhotoDetails = {
-  filmStock: string;
-  capturedAt: Date;
-  exposure: number;
-};
-
 function getNeutralZoomFactor(device: CameraDevice | undefined): number {
   if (!device) return 1;
 
@@ -147,9 +142,7 @@ export default function RealOrCamera() {
   const [halationEnabled, setHalationEnabled] = useState(true);
   const [vignetteEnabled, setVignetteEnabled] = useState(true);
   const [latestPhotoUri, setLatestPhotoUri] = useState<string | null>(null);
-  const [photoModalVisible, setPhotoModalVisible] = useState(false);
-  const [latestPhotoDetails, setLatestPhotoDetails] =
-    useState<CapturedPhotoDetails | null>(null);
+  const [archiveVisible, setArchiveVisible] = useState(false);
   const [photosTaken, setPhotosTaken] = useState(0);
   const captureDetails = useRef({ filmProfile, exposure });
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -174,14 +167,6 @@ export default function RealOrCamera() {
     try {
       const savedPhotoUri = await saveEncodedPhotoToLibrary(base64Data);
       setLatestPhotoUri(savedPhotoUri);
-      const capturedDetails = captureDetails.current;
-      setLatestPhotoDetails({
-        filmStock:
-          filmProfiles.find((profile) => profile.value === capturedDetails.filmProfile)
-            ?.label ?? 'UNKNOWN FILM',
-        capturedAt: new Date(),
-        exposure: capturedDetails.exposure,
-      });
       setPhotosTaken((count) => count + 1);
       setStatusMessage('Saved to camera roll');
       statusTimeout.current = setTimeout(() => setStatusMessage(null), 2200);
@@ -557,7 +542,7 @@ export default function RealOrCamera() {
           <SkiaCamera
             style={StyleSheet.absoluteFill}
             device={device}
-            isActive
+            isActive={!archiveVisible}
             allowHapticsAndSystemSoundsPlayback
             zoom={animatedZoom}
             exposure={boundedExposure}
@@ -741,12 +726,9 @@ export default function RealOrCamera() {
         </View>
         <View style={styles.bottomDeck}>
           <TouchableOpacity
-            accessibilityLabel={
-              latestPhotoUri ? 'Open latest photo' : 'No recent photo'
-            }
+            accessibilityLabel="Open photo archive"
             accessibilityRole="button"
-            disabled={!latestPhotoUri}
-            onPress={() => setPhotoModalVisible(true)}
+            onPress={() => setArchiveVisible(true)}
             style={styles.galleryThumbnail}
           >
             {latestPhotoUri ? (
@@ -830,53 +812,20 @@ export default function RealOrCamera() {
         <Text style={[styles.meterLabel, styles.etchedLabel]}>AUTO</Text>
       </View>
       <Modal
-        visible={photoModalVisible}
-        animationType="fade"
+        visible={archiveVisible}
+        animationType="slide"
         presentationStyle="fullScreen"
-        onRequestClose={() => setPhotoModalVisible(false)}
+        onRequestClose={() => setArchiveVisible(false)}
       >
-        <View style={styles.photoModal}>
-          <StatusBar style="light" />
-          <View style={styles.modalHeader}>
-            <View>
-              <Text style={styles.modalEyebrow}>REALOR · DEVELOPED FRAME</Text>
-              <Text style={styles.modalTitle}>Latest photograph</Text>
-            </View>
-            <TouchableOpacity
-              accessibilityRole="button"
-              accessibilityLabel="Close photo preview"
-              onPress={() => setPhotoModalVisible(false)}
-              style={styles.modalCloseButton}
-            >
-              <Text style={styles.modalCloseText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-          {latestPhotoUri ? (
-            <Image
-              source={{ uri: latestPhotoUri }}
-              resizeMode="contain"
-              style={styles.modalImage}
-            />
-          ) : null}
-          <View style={styles.photoDetails}>
-            <Text style={styles.detailLabel}>FILM STOCK</Text>
-            <Text style={styles.detailValue}>
-              {latestPhotoDetails?.filmStock ?? 'Details unavailable'}
-            </Text>
-            <Text style={styles.detailLabel}>CAPTURED</Text>
-            <Text style={styles.detailValue}>
-              {latestPhotoDetails
-                ? latestPhotoDetails.capturedAt.toLocaleString()
-                : 'Original capture date'}
-            </Text>
-            <Text style={styles.detailLabel}>EXPOSURE BIAS</Text>
-            <Text style={styles.detailValue}>
-              {latestPhotoDetails
-                ? `EV ${latestPhotoDetails.exposure >= 0 ? '+' : ''}${latestPhotoDetails.exposure.toFixed(1)}`
-                : 'Details unavailable'}
-            </Text>
-          </View>
-        </View>
+        <Archive
+          onClose={() => setArchiveVisible(false)}
+          filmStock={
+            filmProfiles.find((profile) => profile.value === filmProfile)?.label ??
+            'LEICA M COLOR'
+          }
+          lens={lens}
+          exposure={boundedExposure}
+        />
       </Modal>
     </View>
   );
@@ -1361,72 +1310,6 @@ const styles = StyleSheet.create({
   },
   shutterDisabled: {
     opacity: 0.5,
-  },
-  photoModal: {
-    flex: 1,
-    paddingTop: 50,
-    paddingBottom: 28,
-    paddingHorizontal: 20,
-    backgroundColor: '#121212',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  modalEyebrow: {
-    color: '#ff9500',
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 1.5,
-  },
-  modalTitle: {
-    marginTop: 5,
-    color: '#f2f2f7',
-    fontSize: 21,
-    fontWeight: '700',
-  },
-  modalCloseButton: {
-    paddingVertical: 9,
-    paddingHorizontal: 13,
-    borderWidth: 1,
-    borderColor: '#6b6b6f',
-    borderRadius: 7,
-    backgroundColor: '#252527',
-  },
-  modalCloseText: {
-    color: '#e5e5ea',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  modalImage: {
-    flex: 1,
-    width: '100%',
-    minHeight: 220,
-    borderRadius: 8,
-    backgroundColor: '#090909',
-  },
-  photoDetails: {
-    marginTop: 18,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#3c3c3e',
-    borderRadius: 8,
-    backgroundColor: '#1c1c1e',
-  },
-  detailLabel: {
-    marginTop: 8,
-    color: '#8e8e93',
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-  },
-  detailValue: {
-    marginTop: 3,
-    color: '#e5e5ea',
-    fontSize: 13,
-    fontWeight: '600',
   },
   error: {
     color: '#f2f2f7',

@@ -23,17 +23,10 @@ workflows:
             CODE_SIGNING_IDENTITY=""
 
           mkdir -p build/Payload
-          APP_PATH=build/RealOr.xcarchive/Products/Applications/RealOr.app
-          if [ ! -d "$APP_PATH" ]; then
-            echo "Build completed without producing RealOr.app in the archive." >&2
-            exit 1
-          fi
-          echo "Found compiled app at: $APP_PATH"
-          cp -R "$APP_PATH" build/Payload/
-          test -d build/Payload/RealOr.app
+          cp -R build/RealOr.xcarchive/Products/Applications/*.app build/Payload/
           cd build
           zip -r ../../RealOr.ipa Payload
           cd ../..
-          test -s RealOr.ipa
+          test -s RealOr.ipa || (echo "RealOr.ipa was not generated" && exit 1)
     artifacts:
       - RealOr.ipa
