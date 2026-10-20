@@ -1,8 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useSharedValue, withTiming } from 'react-native-reanimated';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import {
   Image,
   Modal,
+  Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -51,14 +57,31 @@ type CapturedPhotoDetails = {
 };
 
 function getNeutralZoomFactor(device: CameraDevice | undefined): number {
-  if (!device || !('neutralZoomFactor' in device)) return 1;
+  if (!device) return 1;
 
-  const neutralZoomFactor = device.neutralZoomFactor;
-  return typeof neutralZoomFactor === 'number' &&
-    Number.isFinite(neutralZoomFactor) &&
-    neutralZoomFactor > 0
-    ? neutralZoomFactor
-    : 1;
+  if ('neutralZoom' in device) {
+    const neutralZoom = device.neutralZoom;
+    if (
+      typeof neutralZoom === 'number' &&
+      Number.isFinite(neutralZoom) &&
+      neutralZoom > 0
+    ) {
+      return neutralZoom;
+    }
+  }
+
+  if ('neutralZoomFactor' in device) {
+    const neutralZoomFactor = device.neutralZoomFactor;
+    if (
+      typeof neutralZoomFactor === 'number' &&
+      Number.isFinite(neutralZoomFactor) &&
+      neutralZoomFactor > 0
+    ) {
+      return neutralZoomFactor;
+    }
+  }
+
+  return device.minZoom < 1 ? 1 : 2;
 }
 
 function clampZoom(zoom: number, device: CameraDevice): number {
@@ -79,10 +102,16 @@ export default function RealOrCamera() {
   const zoom5x = device ? clampZoom(base1x * 5, device) : base1x * 5;
   const [zoom, setZoom] = useState(zoom1x);
   const animatedZoom = useSharedValue(zoom);
+  const shutterScale = useSharedValue(1);
+  const shutterAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: shutterScale.value }],
+  }));
+  const zoomDeviceRef = useRef(device);
   const [exposure, setExposure] = useState<number>(0);
   const exposureTouchStart = useRef<{ x: number; y: number } | null>(null);
   const exposureStartY = useRef<number | null>(null);
   const exposureStartValue = useRef(0);
+  const lastHapticEV = useRef<number>(0);
   const { hasPermission, canRequestPermission, requestPermission } =
     useCameraPermission();
   const captureRequested = React.useMemo(
@@ -135,13 +164,14 @@ export default function RealOrCamera() {
 
   useEffect(() => {
     if (!device) return;
-    setZoom(zoom1x);
-    animatedZoom.value = zoom1x;
-  }, [animatedZoom, device, zoom1x]);
-
-  useEffect(() => {
+    if (zoomDeviceRef.current !== device) {
+      zoomDeviceRef.current = device;
+      setZoom(zoom1x);
+      animatedZoom.value = zoom1x;
+      return;
+    }
     animatedZoom.value = withTiming(zoom, { duration: 350 });
-  }, [animatedZoom, zoom]);
+  }, [animatedZoom, device, zoom, zoom1x]);
 
   const saveProcessedPhoto = React.useCallback(async (base64Data: string) => {
     try {
@@ -378,11 +408,6 @@ export default function RealOrCamera() {
     if (!device || !hasPermission || isCapturing) return;
 
     captureDetails.current = { filmProfile, exposure: boundedExposure };
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
-      (error: unknown) => {
-        console.warn('Unable to play shutter haptic feedback.', error);
-      },
-    );
     if (statusTimeout.current) clearTimeout(statusTimeout.current);
     setIsCapturing(true);
     setErrorMessage(null);
@@ -399,12 +424,23 @@ export default function RealOrCamera() {
       maxExposure,
       Math.max(minExposure, nextExposure),
     );
-    setExposure(Math.round(clampedExposure * 10) / 10);
+    const newEV = Math.round(clampedExposure * 10) / 10;
+    if (Math.abs(newEV - lastHapticEV.current) >= 0.1) {
+      void Haptics.selectionAsync().catch((error: unknown) => {
+        console.warn('Unable to play exposure detent haptic feedback.', error);
+      });
+      lastHapticEV.current = newEV;
+    }
+    setExposure(newEV);
   };
 
   const selectExposure = (value: number) => {
     if (!device) return;
-    setExposure(Math.min(maxExposure, Math.max(minExposure, value)));
+    const newEV = Math.round(
+      Math.min(maxExposure, Math.max(minExposure, value)) * 10,
+    ) / 10;
+    lastHapticEV.current = newEV;
+    setExposure(newEV);
   };
   const selectLens = (lensOption: typeof lens) => {
     void Haptics.selectionAsync().catch((error: unknown) => {
@@ -418,6 +454,14 @@ export default function RealOrCamera() {
       console.warn('Unable to play film selection haptic feedback.', error);
     });
     setFilmProfile(profile);
+  };
+  const toggleEffect = (
+    setEnabled: (update: (enabled: boolean) => boolean) => void,
+  ) => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play effect toggle haptic feedback.', error);
+    });
+    setEnabled((enabled) => !enabled);
   };
   const selectedExposureStop = exposureStops.reduce((nearest, stop) =>
     Math.abs(stop - boundedExposure) < Math.abs(nearest - boundedExposure)
@@ -523,6 +567,12 @@ export default function RealOrCamera() {
             onFrame={renderFilmFrame}
             onError={(error) => setErrorMessage(error.message)}
           />
+          <View pointerEvents="none" style={styles.framelineCorners}>
+            <View style={[styles.framelineCorner, styles.framelineTopLeft]} />
+            <View style={[styles.framelineCorner, styles.framelineTopRight]} />
+            <View style={[styles.framelineCorner, styles.framelineBottomLeft]} />
+            <View style={[styles.framelineCorner, styles.framelineBottomRight]} />
+          </View>
           <View pointerEvents="none" style={styles.viewfinderTopLine}>
             <Text style={styles.viewfinderLabel}>FRAME 01</Text>
             <View style={styles.liveDot} />
@@ -595,61 +645,78 @@ export default function RealOrCamera() {
         <View style={styles.controlSection}>
           <Text style={styles.sectionLabel}>FILM STOCK</Text>
           <View style={styles.filmOptions}>
-          {filmProfiles.map((profile) => (
-            <TouchableOpacity
-              key={profile.value}
-              accessibilityRole="button"
-              accessibilityState={{ selected: filmProfile === profile.value }}
-              onPress={() => selectFilmProfile(profile.value)}
-              style={[
-                styles.optionButton,
-                filmProfile === profile.value && styles.optionButtonSelected,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.optionText,
-                  filmProfile === profile.value && styles.optionTextSelected,
-                ]}
-              >
-                {profile.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+            {filmProfiles.map((profile) => {
+              const isSelected = filmProfile === profile.value;
+              return (
+                <Pressable
+                  key={profile.value}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => selectFilmProfile(profile.value)}
+                  style={({ pressed }) => [
+                    styles.optionButton,
+                    isSelected && styles.optionButtonSelected,
+                    pressed && styles.controlButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.optionText,
+                      isSelected && styles.optionTextSelected,
+                    ]}
+                  >
+                    {profile.label}
+                  </Text>
+                  {isSelected ? <View style={styles.activeIndicator} /> : null}
+                </Pressable>
+              );
+            })}
           </View>
         </View>
         <View style={styles.effectOptions}>
-          <TouchableOpacity
+          <Pressable
             accessibilityRole="button"
             accessibilityState={{ checked: halationEnabled }}
-            onPress={() => setHalationEnabled((enabled) => !enabled)}
-            style={[styles.effectButton, halationEnabled && styles.effectButtonSelected]}
+            onPress={() => toggleEffect(setHalationEnabled)}
+            style={({ pressed }) => [
+              styles.effectButton,
+              halationEnabled && styles.effectButtonSelected,
+              pressed && styles.controlButtonPressed,
+            ]}
           >
             <Text style={styles.effectText}>
               Halation {halationEnabled ? 'On' : 'Off'}
             </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
+            {halationEnabled ? <View style={styles.activeIndicator} /> : null}
+          </Pressable>
+          <Pressable
             accessibilityRole="button"
             accessibilityState={{ checked: grainEnabled }}
-            onPress={() => setGrainEnabled((enabled) => !enabled)}
-            style={[styles.effectButton, grainEnabled && styles.effectButtonSelected]}
+            onPress={() => toggleEffect(setGrainEnabled)}
+            style={({ pressed }) => [
+              styles.effectButton,
+              grainEnabled && styles.effectButtonSelected,
+              pressed && styles.controlButtonPressed,
+            ]}
           >
             <Text style={styles.effectText}>Grain {grainEnabled ? 'On' : 'Off'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
+            {grainEnabled ? <View style={styles.activeIndicator} /> : null}
+          </Pressable>
+          <Pressable
             accessibilityRole="button"
             accessibilityState={{ checked: vignetteEnabled }}
-            onPress={() => setVignetteEnabled((enabled) => !enabled)}
-            style={[
+            onPress={() => toggleEffect(setVignetteEnabled)}
+            style={({ pressed }) => [
               styles.effectButton,
               vignetteEnabled && styles.effectButtonSelected,
+              pressed && styles.controlButtonPressed,
             ]}
           >
             <Text style={styles.effectText}>
               Vignette {vignetteEnabled ? 'On' : 'Off'}
             </Text>
-          </TouchableOpacity>
+            {vignetteEnabled ? <View style={styles.activeIndicator} /> : null}
+          </Pressable>
         </View>
         <View style={styles.bottomDeck}>
           <TouchableOpacity
@@ -674,28 +741,33 @@ export default function RealOrCamera() {
           <View style={styles.lensCluster}>
             <Text style={styles.sectionLabel}>FOCAL LENGTH</Text>
             <View style={styles.lensSelector}>
-              {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => (
-                <TouchableOpacity
-                  key={lensOption}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Select ${lensOption} lens`}
-                  accessibilityState={{ selected: lens === lensOption }}
-                  onPress={() => selectLens(lensOption)}
-                  style={[
-                    styles.lensButton,
-                    lens === lensOption && styles.lensButtonSelected,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.lensText,
-                      lens === lensOption && styles.lensTextSelected,
+              {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => {
+                const isSelected = lens === lensOption;
+                return (
+                  <Pressable
+                    key={lensOption}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Select ${lensOption} lens`}
+                    accessibilityState={{ selected: isSelected }}
+                    onPress={() => selectLens(lensOption)}
+                    style={({ pressed }) => [
+                      styles.lensButton,
+                      isSelected && styles.lensButtonSelected,
+                      pressed && styles.controlButtonPressed,
                     ]}
                   >
-                    {lensOption}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    <Text
+                      style={[
+                        styles.lensText,
+                        isSelected && styles.lensTextSelected,
+                      ]}
+                    >
+                      {lensOption}
+                    </Text>
+                    {isSelected ? <View style={styles.activeIndicator} /> : null}
+                  </Pressable>
+                );
+              })}
             </View>
           </View>
           <View style={styles.deckSpacer} />
@@ -703,15 +775,34 @@ export default function RealOrCamera() {
       </View>
       <View style={styles.shutterDeck}>
         <Text style={styles.meterLabel}>BULB</Text>
-        <TouchableOpacity
+        <Pressable
           accessibilityLabel="Take photo"
           accessibilityRole="button"
           disabled={isCapturing}
+          onPressIn={() => {
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
+              (error: unknown) => {
+                console.warn('Unable to play shutter haptic feedback.', error);
+              },
+            );
+            shutterScale.value = withSpring(0.84, {
+              damping: 14,
+              stiffness: 320,
+            });
+          }}
+          onPressOut={() => {
+            shutterScale.value = withSpring(1, {
+              damping: 10,
+              stiffness: 260,
+            });
+          }}
           onPress={() => void takePhoto()}
           style={[styles.shutterButton, isCapturing && styles.shutterDisabled]}
         >
-          <View style={styles.shutterCore} />
-        </TouchableOpacity>
+          <Animated.View
+            style={[styles.shutterCore, shutterAnimatedStyle]}
+          />
+        </Pressable>
         <Text style={styles.meterLabel}>AUTO</Text>
       </View>
       <Modal
@@ -883,9 +974,51 @@ const styles = StyleSheet.create({
   viewfinder: {
     flex: 1,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#555557',
+    borderWidth: 4,
+    borderTopColor: '#050505',
+    borderBottomColor: '#38383a',
+    borderLeftColor: '#121212',
+    borderRightColor: '#121212',
+    borderRadius: 6,
     backgroundColor: '#050505',
+  },
+  framelineCorners: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    margin: 38,
+  },
+  framelineCorner: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    borderColor: '#ffffffbb',
+  },
+  framelineTopLeft: {
+    top: 0,
+    left: 0,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+  },
+  framelineTopRight: {
+    top: 0,
+    right: 0,
+    borderTopWidth: 1,
+    borderRightWidth: 1,
+  },
+  framelineBottomLeft: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+  },
+  framelineBottomRight: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: 1,
+    borderRightWidth: 1,
   },
   viewfinderTopLine: {
     position: 'absolute',
@@ -970,17 +1103,25 @@ const styles = StyleSheet.create({
     backgroundColor: '#111112',
   },
   optionButton: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
     borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#454547',
-    backgroundColor: '#252527',
+    borderTopWidth: 1.5,
+    borderBottomWidth: 4,
+    borderTopColor: '#f5f5f7',
+    borderBottomColor: '#77777b',
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderLeftColor: '#b8b8ba',
+    borderRightColor: '#77777b',
+    backgroundColor: '#c7c7cc',
     paddingVertical: 9,
     paddingHorizontal: 12,
     marginHorizontal: 2,
   },
   optionButtonSelected: {
-    borderColor: '#e5e5ea',
-    backgroundColor: '#d4d4d6',
+    backgroundColor: '#aeb0b4',
   },
   optionText: {
     color: '#c7c7cc',
@@ -997,16 +1138,27 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   effectButton: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
     borderRadius: 5,
-    borderWidth: 1,
-    borderColor: '#454547',
-    backgroundColor: '#202022',
+    borderTopWidth: 1.5,
+    borderBottomWidth: 4,
+    borderTopColor: '#555557',
+    borderBottomColor: '#080808',
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderLeftColor: '#414143',
+    borderRightColor: '#080808',
+    backgroundColor: '#29292b',
     paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     marginHorizontal: 3,
   },
   effectButtonSelected: {
-    borderColor: '#d32f2f',
+    borderTopColor: '#ffbf58',
+    borderLeftColor: '#ff9500',
+    backgroundColor: '#332718',
   },
   effectText: {
     color: '#e5e5ea',
@@ -1026,18 +1178,24 @@ const styles = StyleSheet.create({
   },
   lensButton: {
     minWidth: 48,
+    minHeight: 38,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 16,
-    borderWidth: 1,
-    borderTopColor: '#555557',
-    borderLeftColor: '#454547',
-    borderRightColor: '#222224',
-    borderBottomColor: '#222224',
+    borderTopWidth: 1.5,
+    borderBottomWidth: 4,
+    borderTopColor: '#77777b',
+    borderBottomColor: '#080808',
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderLeftColor: '#555557',
+    borderRightColor: '#080808',
     backgroundColor: '#303033',
   },
   lensButtonSelected: {
-    borderColor: '#ff9500',
+    borderTopColor: '#ffbf58',
+    borderLeftColor: '#ff9500',
     backgroundColor: '#3a2b15',
   },
   lensText: {
@@ -1047,6 +1205,21 @@ const styles = StyleSheet.create({
   },
   lensTextSelected: {
     color: '#ffbf58',
+  },
+  activeIndicator: {
+    width: 5,
+    height: 5,
+    marginLeft: 5,
+    borderRadius: 3,
+    backgroundColor: '#ff9500',
+    shadowColor: '#ff9500',
+    shadowOpacity: 0.9,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  controlButtonPressed: {
+    transform: [{ translateY: 2 }],
+    borderBottomWidth: 2,
   },
   exposureIndicator: {
     position: 'absolute',
@@ -1064,6 +1237,7 @@ const styles = StyleSheet.create({
     color: '#ff9500',
     fontSize: 10,
     fontWeight: '800',
+    fontFamily: 'Courier',
     fontVariant: ['tabular-nums'],
   },
   exposureReset: {
@@ -1095,6 +1269,7 @@ const styles = StyleSheet.create({
     minWidth: 15,
     color: '#c7c7cc',
     fontSize: 9,
+    fontFamily: 'Courier',
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
     textAlign: 'right',
@@ -1159,28 +1334,28 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
   },
   shutterButton: {
-    width: 66,
-    height: 66,
+    width: 74,
+    height: 74,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 34,
-    borderWidth: 5,
-    borderTopColor: '#f5f5f7',
-    borderLeftColor: '#d1d1d3',
+    borderRadius: 37,
+    borderWidth: 3,
+    borderTopColor: '#ffffff',
+    borderBottomColor: '#8e8e93',
+    borderLeftColor: '#c7c7cc',
     borderRightColor: '#8e8e93',
-    borderBottomColor: '#77777b',
-    backgroundColor: '#b9b9bc',
+    backgroundColor: '#e5e5ea',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.55,
-    shadowRadius: 4,
-    elevation: 5,
+    shadowRadius: 8,
+    elevation: 10,
   },
   shutterCore: {
-    width: 43,
-    height: 43,
-    borderRadius: 22,
-    borderWidth: 3,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 4,
     borderTopColor: '#8d1d1d',
     borderLeftColor: '#b82828',
     borderRightColor: '#631616',
