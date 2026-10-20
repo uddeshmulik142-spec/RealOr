@@ -47,7 +47,8 @@
             "photo"
           ]
         }
-      ]
+      ],
+      "./plugins/withNitroHeaderSearchPaths"
     ],
     "extra": {
       "eas": {
