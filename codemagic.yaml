@@ -12,11 +12,14 @@ workflows:
       - name: Build Unsigned IPA
         script: |
           cd ios
-          xcodebuild archive -workspace $(ls -d *.xcworkspace) -scheme RealOr -configuration Release -archivePath build/RealOr.xcarchive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
-          # Find the built .app product dynamically so it never misses the path
-          APP_PATH=$(find build -name "*.app" -maxdepth 4 | head -n 1)
-          echo "Found app at: $APP_PATH"
+          # Build directly to a known folder path
+          xcodebuild -workspace $(ls -d *.xcworkspace) -scheme RealOr -configuration Release -derivedDataPath derivedData CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
+
+          # Locate the built .app product inside DerivedData
           mkdir -p build/Payload
+          APP_PATH=$(find derivedData -name "RealOr.app" -type d | head -n 1)
+          echo "Found app at: $APP_PATH"
+
           cp -R "$APP_PATH" build/Payload/
           cd build
           zip -r ../../RealOr.ipa Payload
