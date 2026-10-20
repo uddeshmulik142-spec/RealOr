@@ -59,17 +59,6 @@ type CapturedPhotoDetails = {
 function getNeutralZoomFactor(device: CameraDevice | undefined): number {
   if (!device) return 1;
 
-  if ('neutralZoom' in device) {
-    const neutralZoom = device.neutralZoom;
-    if (
-      typeof neutralZoom === 'number' &&
-      Number.isFinite(neutralZoom) &&
-      neutralZoom > 0
-    ) {
-      return neutralZoom;
-    }
-  }
-
   if ('neutralZoomFactor' in device) {
     const neutralZoomFactor = device.neutralZoomFactor;
     if (
@@ -78,6 +67,17 @@ function getNeutralZoomFactor(device: CameraDevice | undefined): number {
       neutralZoomFactor > 0
     ) {
       return neutralZoomFactor;
+    }
+  }
+
+  if ('neutralZoom' in device) {
+    const neutralZoom = device.neutralZoom;
+    if (
+      typeof neutralZoom === 'number' &&
+      Number.isFinite(neutralZoom) &&
+      neutralZoom > 0
+    ) {
+      return neutralZoom;
     }
   }
 
@@ -95,11 +95,15 @@ export default function RealOrCamera() {
   });
   const defaultBackDevice = useCameraDevice('back');
   const device = multiLensDevice ?? defaultBackDevice;
-  const base1x = getNeutralZoomFactor(device);
-  const zoom05x = device?.minZoom ?? base1x * 0.5;
-  const zoom1x = device ? clampZoom(base1x, device) : base1x;
-  const zoom2x = device ? clampZoom(base1x * 2, device) : base1x * 2;
-  const zoom5x = device ? clampZoom(base1x * 5, device) : base1x * 5;
+  const minZ = device?.minZoom ?? 1;
+  const neutralZ = getNeutralZoomFactor(device);
+  const zoomLevels = {
+    '0.5x': device ? clampZoom(minZ, device) : minZ,
+    '1x': device ? clampZoom(neutralZ, device) : neutralZ,
+    '2x': device ? clampZoom(neutralZ * 2, device) : neutralZ * 2,
+    '5x': device ? clampZoom(neutralZ * 5, device) : neutralZ * 5,
+  };
+  const zoom1x = zoomLevels['1x'];
   const [zoom, setZoom] = useState(zoom1x);
   const animatedZoom = useSharedValue(zoom);
   const shutterScale = useSharedValue(1);
@@ -155,13 +159,6 @@ export default function RealOrCamera() {
     maxExposure,
     Math.max(minExposure, exposure),
   );
-  const zoomFactors = {
-    '0.5x': device ? clampZoom(zoom05x, device) : zoom05x,
-    '1x': zoom1x,
-    '2x': zoom2x,
-    '5x': zoom5x,
-  };
-
   useEffect(() => {
     if (!device) return;
     if (zoomDeviceRef.current !== device) {
@@ -447,7 +444,7 @@ export default function RealOrCamera() {
       console.warn('Unable to play lens selection haptic feedback.', error);
     });
     setLens(lensOption);
-    setZoom(zoomFactors[lensOption]);
+    setZoom(zoomLevels[lensOption]);
   };
   const selectFilmProfile = (profile: FilmProfile) => {
     void Haptics.selectionAsync().catch((error: unknown) => {
@@ -530,7 +527,9 @@ export default function RealOrCamera() {
         <View style={styles.brandMark}>
           <View style={styles.brandDot} />
           <Text style={styles.brandText}>REALOR</Text>
-          <Text style={styles.brandEdition}>RANGEFINDER · 35</Text>
+          <Text style={[styles.brandEdition, styles.etchedLabel]}>
+            RANGEFINDER · 35
+          </Text>
         </View>
         <View style={styles.lcdPanel}>
           <Text style={styles.lcdReadout}>[ {24 - (photosTaken % 24)} EXP ]</Text>
@@ -553,7 +552,7 @@ export default function RealOrCamera() {
         </View>
       </View>
 
-      <View style={styles.viewfinderFrame}>
+      <View style={styles.viewfinderContainer}>
         <View style={styles.viewfinder}>
           <SkiaCamera
             style={StyleSheet.absoluteFill}
@@ -643,7 +642,7 @@ export default function RealOrCamera() {
           </Text>
         ) : null}
         <View style={styles.controlSection}>
-          <Text style={styles.sectionLabel}>FILM STOCK</Text>
+          <Text style={[styles.sectionLabel, styles.etchedLabel]}>FILM STOCK</Text>
           <View style={styles.filmOptions}>
             {filmProfiles.map((profile) => {
               const isSelected = filmProfile === profile.value;
@@ -654,15 +653,17 @@ export default function RealOrCamera() {
                   accessibilityState={{ selected: isSelected }}
                   onPress={() => selectFilmProfile(profile.value)}
                   style={({ pressed }) => [
-                    styles.optionButton,
-                    isSelected && styles.optionButtonSelected,
+                    styles.buttonInactive,
+                    styles.filmButton,
+                    isSelected && styles.buttonActive,
                     pressed && styles.controlButtonPressed,
                   ]}
                 >
                   <Text
                     style={[
-                      styles.optionText,
-                      isSelected && styles.optionTextSelected,
+                      styles.textInactive,
+                      isSelected && styles.textActive,
+                      styles.filmText,
                     ]}
                   >
                     {profile.label}
@@ -679,12 +680,18 @@ export default function RealOrCamera() {
             accessibilityState={{ checked: halationEnabled }}
             onPress={() => toggleEffect(setHalationEnabled)}
             style={({ pressed }) => [
-              styles.effectButton,
-              halationEnabled && styles.effectButtonSelected,
+              styles.buttonInactive,
+              styles.effectButtonLayout,
+              halationEnabled && styles.buttonActive,
               pressed && styles.controlButtonPressed,
             ]}
           >
-            <Text style={styles.effectText}>
+            <Text
+              style={[
+                styles.textInactive,
+                halationEnabled && styles.textActive,
+              ]}
+            >
               Halation {halationEnabled ? 'On' : 'Off'}
             </Text>
             {halationEnabled ? <View style={styles.activeIndicator} /> : null}
@@ -694,12 +701,20 @@ export default function RealOrCamera() {
             accessibilityState={{ checked: grainEnabled }}
             onPress={() => toggleEffect(setGrainEnabled)}
             style={({ pressed }) => [
-              styles.effectButton,
-              grainEnabled && styles.effectButtonSelected,
+              styles.buttonInactive,
+              styles.effectButtonLayout,
+              grainEnabled && styles.buttonActive,
               pressed && styles.controlButtonPressed,
             ]}
           >
-            <Text style={styles.effectText}>Grain {grainEnabled ? 'On' : 'Off'}</Text>
+            <Text
+              style={[
+                styles.textInactive,
+                grainEnabled && styles.textActive,
+              ]}
+            >
+              Grain {grainEnabled ? 'On' : 'Off'}
+            </Text>
             {grainEnabled ? <View style={styles.activeIndicator} /> : null}
           </Pressable>
           <Pressable
@@ -707,12 +722,18 @@ export default function RealOrCamera() {
             accessibilityState={{ checked: vignetteEnabled }}
             onPress={() => toggleEffect(setVignetteEnabled)}
             style={({ pressed }) => [
-              styles.effectButton,
-              vignetteEnabled && styles.effectButtonSelected,
+              styles.buttonInactive,
+              styles.effectButtonLayout,
+              vignetteEnabled && styles.buttonActive,
               pressed && styles.controlButtonPressed,
             ]}
           >
-            <Text style={styles.effectText}>
+            <Text
+              style={[
+                styles.textInactive,
+                vignetteEnabled && styles.textActive,
+              ]}
+            >
               Vignette {vignetteEnabled ? 'On' : 'Off'}
             </Text>
             {vignetteEnabled ? <View style={styles.activeIndicator} /> : null}
@@ -739,7 +760,9 @@ export default function RealOrCamera() {
             )}
           </TouchableOpacity>
           <View style={styles.lensCluster}>
-            <Text style={styles.sectionLabel}>FOCAL LENGTH</Text>
+            <Text style={[styles.sectionLabel, styles.etchedLabel]}>
+              FOCAL LENGTH
+            </Text>
             <View style={styles.lensSelector}>
               {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => {
                 const isSelected = lens === lensOption;
@@ -751,15 +774,16 @@ export default function RealOrCamera() {
                     accessibilityState={{ selected: isSelected }}
                     onPress={() => selectLens(lensOption)}
                     style={({ pressed }) => [
-                      styles.lensButton,
-                      isSelected && styles.lensButtonSelected,
+                      styles.buttonInactive,
+                      styles.lensButtonLayout,
+                      isSelected && styles.buttonActive,
                       pressed && styles.controlButtonPressed,
                     ]}
                   >
                     <Text
                       style={[
-                        styles.lensText,
-                        isSelected && styles.lensTextSelected,
+                        styles.textInactive,
+                        isSelected && styles.textActive,
                       ]}
                     >
                       {lensOption}
@@ -774,7 +798,7 @@ export default function RealOrCamera() {
         </View>
       </View>
       <View style={styles.shutterDeck}>
-        <Text style={styles.meterLabel}>BULB</Text>
+        <Text style={[styles.meterLabel, styles.etchedLabel]}>BULB</Text>
         <Pressable
           accessibilityLabel="Take photo"
           accessibilityRole="button"
@@ -797,13 +821,13 @@ export default function RealOrCamera() {
             });
           }}
           onPress={() => void takePhoto()}
-          style={[styles.shutterButton, isCapturing && styles.shutterDisabled]}
+          style={[styles.shutterOuter, isCapturing && styles.shutterDisabled]}
         >
           <Animated.View
-            style={[styles.shutterCore, shutterAnimatedStyle]}
+            style={[styles.shutterInner, shutterAnimatedStyle]}
           />
         </Pressable>
-        <Text style={styles.meterLabel}>AUTO</Text>
+        <Text style={[styles.meterLabel, styles.etchedLabel]}>AUTO</Text>
       </View>
       <Modal
         visible={photoModalVisible}
@@ -958,28 +982,24 @@ const styles = StyleSheet.create({
     height: 5,
     backgroundColor: '#ff9500',
   },
-  viewfinderFrame: {
+  viewfinderContainer: {
     flex: 1,
     width: '100%',
     maxHeight: '58%',
     aspectRatio: 0.75,
     alignSelf: 'center',
-    padding: 8,
-    borderTopWidth: 2,
-    borderTopColor: '#414143',
-    borderBottomWidth: 3,
-    borderBottomColor: '#050505',
-    backgroundColor: '#090909',
+    borderWidth: 4,
+    borderTopColor: '#050505',
+    borderLeftColor: '#050505',
+    borderBottomColor: '#38383a',
+    borderRightColor: '#38383a',
+    borderRadius: 6,
+    overflow: 'hidden',
+    backgroundColor: '#050505',
   },
   viewfinder: {
     flex: 1,
     overflow: 'hidden',
-    borderWidth: 4,
-    borderTopColor: '#050505',
-    borderBottomColor: '#38383a',
-    borderLeftColor: '#121212',
-    borderRightColor: '#121212',
-    borderRadius: 6,
     backgroundColor: '#050505',
   },
   framelineCorners: {
@@ -1049,6 +1069,13 @@ const styles = StyleSheet.create({
     fontSize: 8,
     fontWeight: '700',
     letterSpacing: 1,
+    textShadowColor: 'rgba(255,255,255,0.12)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1,
+  },
+  etchedLabel: {
+    textShadowColor: 'rgba(255,255,255,0.12)',
+    textShadowOffset: { width: 0, height: 1 },
   },
   liveDot: {
     width: 6,
@@ -1102,68 +1129,60 @@ const styles = StyleSheet.create({
     borderRadius: 9,
     backgroundColor: '#111112',
   },
-  optionButton: {
+  buttonInactive: {
     minHeight: 40,
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: 6,
     borderTopWidth: 1.5,
     borderBottomWidth: 4,
-    borderTopColor: '#f5f5f7',
-    borderBottomColor: '#77777b',
+    borderTopColor: '#535357',
+    borderBottomColor: '#080808',
     borderLeftWidth: 1,
     borderRightWidth: 1,
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    backgroundColor: '#29292b',
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+  },
+  buttonActive: {
+    borderTopColor: '#ffd27a',
+    borderBottomColor: '#6e3d00',
+    borderLeftColor: '#ff9500',
+    borderRightColor: '#6e3d00',
+    backgroundColor: '#3a2b15',
+  },
+  filmButton: {
+    borderTopColor: '#f5f5f7',
+    borderBottomColor: '#77777b',
     borderLeftColor: '#b8b8ba',
     borderRightColor: '#77777b',
     backgroundColor: '#c7c7cc',
-    paddingVertical: 9,
-    paddingHorizontal: 12,
     marginHorizontal: 2,
   },
-  optionButtonSelected: {
-    backgroundColor: '#aeb0b4',
-  },
-  optionText: {
-    color: '#c7c7cc',
+  filmText: {
     fontSize: 9,
-    fontWeight: '700',
     letterSpacing: 0.3,
   },
-  optionTextSelected: {
-    color: '#171719',
+  textInactive: {
+    color: '#c7c7cc',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  textActive: {
+    color: '#ffbf58',
   },
   effectOptions: {
     flexDirection: 'row',
     justifyContent: 'center',
     marginBottom: 8,
   },
-  effectButton: {
+  effectButtonLayout: {
     minHeight: 34,
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 5,
-    borderTopWidth: 1.5,
-    borderBottomWidth: 4,
-    borderTopColor: '#555557',
-    borderBottomColor: '#080808',
-    borderLeftWidth: 1,
-    borderRightWidth: 1,
-    borderLeftColor: '#414143',
-    borderRightColor: '#080808',
-    backgroundColor: '#29292b',
     paddingVertical: 6,
-    paddingHorizontal: 8,
+    paddingHorizontal: 7,
     marginHorizontal: 3,
-  },
-  effectButtonSelected: {
-    borderTopColor: '#ffbf58',
-    borderLeftColor: '#ff9500',
-    backgroundColor: '#332718',
-  },
-  effectText: {
-    color: '#e5e5ea',
-    fontSize: 9,
-    fontWeight: '600',
   },
   lensSelector: {
     flexDirection: 'row',
@@ -1176,35 +1195,13 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: '#111112',
   },
-  lensButton: {
+  lensButtonLayout: {
     minWidth: 48,
-    minHeight: 38,
-    flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 16,
-    borderTopWidth: 1.5,
-    borderBottomWidth: 4,
     borderTopColor: '#77777b',
-    borderBottomColor: '#080808',
-    borderLeftWidth: 1,
-    borderRightWidth: 1,
     borderLeftColor: '#555557',
-    borderRightColor: '#080808',
-    backgroundColor: '#303033',
-  },
-  lensButtonSelected: {
-    borderTopColor: '#ffbf58',
-    borderLeftColor: '#ff9500',
-    backgroundColor: '#3a2b15',
-  },
-  lensText: {
-    color: '#e5e5ea',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  lensTextSelected: {
-    color: '#ffbf58',
+    paddingHorizontal: 8,
   },
   activeIndicator: {
     width: 5,
@@ -1333,7 +1330,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 1.5,
   },
-  shutterButton: {
+  shutterOuter: {
     width: 74,
     height: 74,
     alignItems: 'center',
@@ -1351,7 +1348,7 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 10,
   },
-  shutterCore: {
+  shutterInner: {
     width: 50,
     height: 50,
     borderRadius: 25,
