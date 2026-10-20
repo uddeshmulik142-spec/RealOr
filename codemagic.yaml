@@ -7,13 +7,56 @@ workflows:
     scripts:
       - name: Install dependencies
         script: npm install
-      - name: Expo Prebuild
-        script: npx expo prebuild --platform ios
+      - name: Expo Prebuild & Patch Podfile
+        script: |
+          set -e
+
+          # Generate the native project without running CocoaPods yet.
+          npx expo prebuild --platform ios --no-install
+
+          if [ ! -f "ios/Podfile" ]; then
+            echo "Error: ios/Podfile not found after prebuild"
+            exit 1
+          fi
+
+          cat << 'EOF' > patch.rb
+          path = 'ios/Podfile'
+          content = File.read(path)
+          marker = '# RealOr NitroModules header search paths'
+
+          unless content.include?(marker)
+            hook = "post_install do |installer|"
+            unless content.include?(hook)
+              abort "Error: post_install hook not found in ios/Podfile"
+            end
+
+            patch = <<~'PATCH'
+              # RealOr NitroModules header search paths
+              installer.pods_project.targets.each do |target|
+                target.build_configurations.each do |config|
+                  search_paths = config.build_settings['HEADER_SEARCH_PATHS']
+                  search_paths = ['$(inherited)'] if search_paths.nil?
+                  search_paths = [search_paths] unless search_paths.is_a?(Array)
+                  search_paths |= [
+                    '"$(PODS_ROOT)/Headers/Public/react-native-nitro-modules"',
+                    '"$(PODS_ROOT)/../../node_modules/react-native-nitro-modules/cpp"',
+                  ]
+                  config.build_settings['HEADER_SEARCH_PATHS'] = search_paths
+                end
+              end
+            PATCH
+
+            content.sub!(hook, "#{hook}\n#{patch}")
+            File.write(path, content)
+          end
+          EOF
+          ruby patch.rb
+          rm patch.rb
       - name: Install CocoaPods
         script: |
+          set -e
           cd ios
-          pod install
-          cd ..
+          pod install --repo-update
       - name: Build Unsigned IPA
         script: |
           set -euo pipefail
@@ -24,7 +67,14 @@ workflows:
           fi
 
           cd ios
-          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1 || true)
+
+          if [ -z "$WORKSPACE" ]; then
+            echo "CRITICAL ERROR: No .xcworkspace found! Here is what is inside the ios directory:"
+            ls -la
+            exit 1
+          fi
+
           echo "Using workspace: $WORKSPACE"
 
           xcodebuild archive \
