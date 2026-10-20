@@ -13,8 +13,11 @@ workflows:
         script: |
           cd ios
           xcodebuild archive -workspace $(ls -d *.xcworkspace) -scheme RealOr -configuration Release -archivePath build/RealOr.xcarchive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
+          # Find the built .app product dynamically so it never misses the path
+          APP_PATH=$(find build -name "*.app" -maxdepth 4 | head -n 1)
+          echo "Found app at: $APP_PATH"
           mkdir -p build/Payload
-          cp -R build/RealOr.xcarchive/Products/Applications/*.app build/Payload/
+          cp -R "$APP_PATH" build/Payload/
           cd build
           zip -r ../../RealOr.ipa Payload
     artifacts:
