@@ -9,6 +9,21 @@ workflows:
         script: npm install
       - name: Expo Prebuild
         script: npx expo prebuild --platform ios
+      - name: Install CocoaPods
+        script: |
+          set -euo pipefail
+          if [ ! -f "ios/Podfile" ]; then
+            echo "Error: ios/Podfile not found after prebuild"
+            exit 1
+          fi
+          cd ios
+          pod install
+          WORKSPACE=$(find . -maxdepth 1 -type d -name '*.xcworkspace' -print -quit)
+          if [ -z "$WORKSPACE" ]; then
+            echo "Error: CocoaPods did not generate an Xcode workspace"
+            exit 1
+          fi
+          echo "Generated workspace: $WORKSPACE"
       - name: Build Unsigned IPA
         script: |
           set -euo pipefail
@@ -20,7 +35,11 @@ workflows:
           fi
 
           cd ios
-          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          WORKSPACE=$(find . -maxdepth 1 -type d -name '*.xcworkspace' -print -quit)
+          if [ -z "$WORKSPACE" ]; then
+            echo "Error: Xcode workspace not found after CocoaPods installation"
+            exit 1
+          fi
           echo "Using workspace: $WORKSPACE"
 
           xcodebuild archive \
