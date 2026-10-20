@@ -62,6 +62,8 @@ const aspectRatios = ['3:4', '6:7', '1:1', '16:9'] as const;
 type AspectRatio = (typeof aspectRatios)[number];
 
 function getAspectRatioValue(ratio: AspectRatio): number {
+  'worklet';
+
   switch (ratio) {
     case '6:7':
       return 6 / 7;
@@ -245,6 +247,7 @@ export default function RealOrCamera() {
         render(({ canvas, frameTexture }) => {
           const width = frameTexture.width();
           const height = frameTexture.height();
+          const dynamicSeed = (frame.timestamp / 1000) % 10000;
           const clearPending = clearFirstExposureRequested.getBlocking();
           let previousFrame = firstExposureImage.getBlocking();
           if (clearPending) {
@@ -291,7 +294,7 @@ export default function RealOrCamera() {
               filmProfile,
               grainEnabled ? 0.35 : 0,
               halationEnabled ? 0.65 : 0,
-              17,
+              dynamicSeed,
               boundedExposure,
               vignetteEnabled ? 0.9 : 0,
             ];
@@ -361,7 +364,7 @@ export default function RealOrCamera() {
                   filmProfile,
                   grainEnabled ? 0.35 : 0,
                   halationEnabled ? 0.65 : 0,
-                  17,
+                  dynamicSeed,
                   boundedExposure,
                   vignetteEnabled ? 0.9 : 0,
                 ];
@@ -444,18 +447,17 @@ export default function RealOrCamera() {
 
                 scheduleOnRN(saveProcessedPhoto, base64Data);
               } catch (error: unknown) {
-                scheduleOnRN(
-                  failCapture,
-                  error instanceof Error ? error.message : 'Unable to capture photo.',
-                );
+                firstExposureRequested.setBlocking(false);
+                captureRequested.setBlocking(false);
+                finalExposureRequested.setBlocking(false);
+                clearFirstExposureRequested.setBlocking(true);
+                firstExposureAvailable.setBlocking(false);
+                liveMxMix.setBlocking(0);
+                const heldFrame = firstExposureImage.getBlocking();
+                firstExposureImage.setBlocking(null);
+                heldFrame?.dispose();
+                scheduleOnRN(failCapture, `Capture failed: ${error}`);
               } finally {
-                if (finalCapture) {
-                  liveMxMix.setBlocking(0);
-                  const heldFrame = firstExposureImage.getBlocking();
-                  firstExposureImage.setBlocking(null);
-                  firstExposureAvailable.setBlocking(false);
-                  heldFrame?.dispose();
-                }
                 snapshot?.dispose();
                 surface?.dispose();
                 offscreenPaint?.dispose();
@@ -466,20 +468,15 @@ export default function RealOrCamera() {
             }
           } catch (error: unknown) {
             firstExposureRequested.setBlocking(false);
-            if (finalCapture) {
-              finalExposureRequested.setBlocking(false);
-              liveMxMix.setBlocking(0);
-              const heldFrame = firstExposureImage.getBlocking();
-              firstExposureImage.setBlocking(null);
-              firstExposureAvailable.setBlocking(false);
-              heldFrame?.dispose();
-            }
-            scheduleOnRN(
-              failCapture,
-              error instanceof Error
-                ? error.message
-                : 'Unable to process camera frame.',
-            );
+            captureRequested.setBlocking(false);
+            finalExposureRequested.setBlocking(false);
+            clearFirstExposureRequested.setBlocking(true);
+            firstExposureAvailable.setBlocking(false);
+            liveMxMix.setBlocking(0);
+            const heldFrame = firstExposureImage.getBlocking();
+            firstExposureImage.setBlocking(null);
+            heldFrame?.dispose();
+            scheduleOnRN(failCapture, `Capture failed: ${error}`);
           } finally {
             screenPaint?.dispose();
             screenShader?.dispose();
@@ -492,10 +489,13 @@ export default function RealOrCamera() {
         firstExposureRequested.setBlocking(false);
         captureRequested.setBlocking(false);
         finalExposureRequested.setBlocking(false);
-        scheduleOnRN(
-          failCapture,
-          error instanceof Error ? error.message : 'Unable to process camera frame.',
-        );
+        clearFirstExposureRequested.setBlocking(true);
+        firstExposureAvailable.setBlocking(false);
+        liveMxMix.setBlocking(0);
+        const heldFrame = firstExposureImage.getBlocking();
+        firstExposureImage.setBlocking(null);
+        heldFrame?.dispose();
+        scheduleOnRN(failCapture, `Capture failed: ${error}`);
       } finally {
         frame.dispose();
       }
@@ -637,20 +637,32 @@ export default function RealOrCamera() {
     setAspectRatio(ratio);
   };
 
+  const handleCancelMx = () => {
+    void Haptics.notificationAsync(
+      Haptics.NotificationFeedbackType.Warning,
+    ).catch((error: unknown) => {
+      console.warn('Unable to play MX cancellation haptic feedback.', error);
+    });
+    clearFirstExposureRequested.setBlocking(true);
+    firstExposureRequested.setBlocking(false);
+    finalExposureRequested.setBlocking(false);
+    captureRequested.setBlocking(false);
+    firstExposureAvailable.setBlocking(false);
+    liveMxMix.setBlocking(0);
+    setIsAwaitingSecondExposure(false);
+    setMxMode(false);
+    setStatusMessage(null);
+  };
+
   const toggleMxMode = () => {
+    if (mxMode || isAwaitingSecondExposure) {
+      handleCancelMx();
+      return;
+    }
     void Haptics.selectionAsync().catch((error: unknown) => {
       console.warn('Unable to play MX mode haptic feedback.', error);
     });
-    if (mxMode || isAwaitingSecondExposure) {
-      clearFirstExposureRequested.setBlocking(true);
-      firstExposureRequested.setBlocking(false);
-      finalExposureRequested.setBlocking(false);
-      firstExposureAvailable.setBlocking(false);
-      liveMxMix.setBlocking(0);
-      setIsAwaitingSecondExposure(false);
-      setStatusMessage(null);
-    }
-    setMxMode((enabled) => !enabled);
+    setMxMode(true);
   };
 
   const updateExposureFromDrag = (pageY: number) => {
@@ -980,6 +992,7 @@ export default function RealOrCamera() {
                 : `Toggle MX double exposure${mxMode ? ' on' : ' off'}`
             }
             accessibilityState={{ checked: mxMode }}
+            disabled={isCapturing}
             onPress={toggleMxMode}
             style={({ pressed }) => [
               styles.mxButton,
