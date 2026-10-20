@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import Animated, {
+  interpolateColor,
+  useDerivedValue,
+  useAnimatedStyle,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
 import {
   AssetField,
   MediaType,
@@ -8,7 +15,6 @@ import {
 } from 'expo-media-library';
 import * as Haptics from 'expo-haptics';
 import {
-  ActivityIndicator,
   FlatList,
   Image,
   Pressable,
@@ -75,6 +81,16 @@ function formatDevelopedDate(date: Date | null): string {
   return `${year} ${month} ${day}`;
 }
 
+function formatImprintDate(date: Date | null): string {
+  if (!date || Number.isNaN(date.getTime())) {
+    return '-- -- --';
+  }
+  const year = String(date.getFullYear()).slice(-2);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year} ${month} ${day}`;
+}
+
 export default function Archive({
   onClose,
   filmStock,
@@ -87,6 +103,18 @@ export default function Archive({
   const [isLoading, setIsLoading] = useState(true);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const safelightProgress = useDerivedValue(() =>
+    isLoading
+      ? withRepeat(withTiming(1, { duration: 1400 }), -1, true)
+      : withTiming(0, { duration: 300 }),
+  );
+  const safelightStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(
+      safelightProgress.value,
+      [0, 1],
+      ['#050505', '#3a0505'],
+    ),
+  }));
 
   const refreshPhotos = useCallback(async () => {
     setIsLoading(true);
@@ -153,13 +181,21 @@ export default function Archive({
         <Text style={styles.frameNumber}>
           {String(index + 1).padStart(2, '0')}
         </Text>
+        <View style={styles.marginImprint}>
+          <Text style={styles.imprintDate}>
+            {formatImprintDate(item.createdAt)}
+          </Text>
+          <Text numberOfLines={1} style={styles.imprintStock}>
+            {filmStock}
+          </Text>
+        </View>
       </Pressable>
     ),
-    [openPhoto, width],
+    [filmStock, openPhoto, width],
   );
 
   return (
-    <View style={styles.container}>
+    <Animated.View style={[styles.container, safelightStyle]}>
       <StatusBar barStyle="light-content" />
       <View style={styles.header}>
         <View>
@@ -179,11 +215,16 @@ export default function Archive({
         </Pressable>
       </View>
 
-      <View style={styles.contactSheet}>
+      <View
+        style={[
+          styles.contactSheet,
+          isLoading && styles.contactSheetLoading,
+        ]}
+      >
         {isLoading ? (
           <View style={styles.messageState}>
-            <ActivityIndicator color="#ff9500" />
-            <Text style={styles.stateText}>READING THE NEGATIVES</Text>
+            <View style={styles.safelightIndicator} />
+            <Text style={styles.stateText}>DEVELOPING CONTACT SHEET</Text>
           </View>
         ) : permissionDenied ? (
           <View style={styles.messageState}>
@@ -276,7 +317,7 @@ export default function Archive({
           </View>
         </View>
       ) : null}
-    </View>
+    </Animated.View>
   );
 }
 
@@ -345,11 +386,15 @@ const styles = StyleSheet.create({
     backgroundColor: '#151512',
     padding: 6,
   },
+  contactSheetLoading: {
+    backgroundColor: 'transparent',
+  },
   contactSheetContent: {
     paddingBottom: 4,
   },
   slideMount: {
     padding: 4,
+    paddingBottom: 16,
     margin: 2,
     backgroundColor: '#1c1c1e',
     borderWidth: 1,
@@ -372,6 +417,40 @@ const styles = StyleSheet.create({
     fontFamily: 'Menlo',
     paddingTop: 5,
     paddingBottom: 1,
+  },
+  marginImprint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 3,
+    paddingTop: 5,
+  },
+  imprintDate: {
+    color: '#c27921',
+    opacity: 0.7,
+    fontSize: 6,
+    letterSpacing: 0.2,
+    fontFamily: 'Courier',
+    fontVariant: ['tabular-nums'],
+  },
+  imprintStock: {
+    flexShrink: 1,
+    color: '#c27921',
+    opacity: 0.7,
+    fontSize: 6,
+    letterSpacing: 0.1,
+    fontFamily: 'Courier',
+    textAlign: 'right',
+  },
+  safelightIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ff3b30',
+    shadowColor: '#ff3b30',
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 4,
   },
   messageState: {
     flex: 1,

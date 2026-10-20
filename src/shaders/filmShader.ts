@@ -25,9 +25,9 @@ uniform float u_exposure;
 uniform float u_vignette;
 
 float hash(float2 p) {
-  p = fract(p * float2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
+  p = fract(p * float2(443.897, 441.423));
+  p += dot(p, p.yx + 19.19);
+  return fract((p.x + p.y) * p.x);
 }
 
 float3 toLinear(float3 c) {

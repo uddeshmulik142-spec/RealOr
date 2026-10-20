@@ -8,6 +8,7 @@ import Animated, {
 import {
   Image,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -57,6 +58,17 @@ const FILM_STOCKS: { id: FilmProfile; name: string }[] = [
   { id: 7, name: 'EKTACHROME' },
   { id: 8, name: 'AGFA VISTA' },
 ];
+const FILM_DX_COLORS: Record<FilmProfile, { backgroundColor: string; textColor: string }> = {
+  0: { backgroundColor: '#f2cf38', textColor: '#17130a' },
+  1: { backgroundColor: '#a8b7ad', textColor: '#101613' },
+  2: { backgroundColor: '#bd2525', textColor: '#fff4e4' },
+  3: { backgroundColor: '#d8ad45', textColor: '#17130a' },
+  4: { backgroundColor: '#73945a', textColor: '#10150c' },
+  5: { backgroundColor: '#f0eee5', textColor: '#111111' },
+  6: { backgroundColor: '#d9d7c9', textColor: '#111111' },
+  7: { backgroundColor: '#4f78ad', textColor: '#f5f5f7' },
+  8: { backgroundColor: '#dc7942', textColor: '#17100c' },
+};
 const exposureStops = [-2, -1, 0, 1, 2] as const;
 const aspectRatios = ['3:4', '6:7', '1:1', '16:9'] as const;
 type AspectRatio = (typeof aspectRatios)[number];
@@ -127,8 +139,21 @@ export default function RealOrCamera() {
   const [zoom, setZoom] = useState(zoom1x);
   const animatedZoom = useSharedValue(zoom);
   const shutterScale = useSharedValue(1);
+  const [isShutterArmed, setIsShutterArmed] = useState(true);
+  const isShutterArmedRef = useRef(true);
+  const leverProgress = useSharedValue(0);
+  const [leverTrackWidth, setLeverTrackWidth] = useState(0);
+  const leverTrackWidthRef = useRef(0);
   const shutterAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: shutterScale.value }],
+  }));
+  const leverAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateX:
+          leverProgress.value * Math.max(0, leverTrackWidth - 36),
+      },
+    ],
   }));
   const zoomDeviceRef = useRef(device);
   const [exposure, setExposure] = useState<number>(0);
@@ -204,6 +229,7 @@ export default function RealOrCamera() {
     maxExposure,
     Math.max(minExposure, exposure),
   );
+  const activeFilm = FILM_STOCKS.find((profile) => profile.id === filmProfile);
   useEffect(() => {
     if (!device) return;
     if (zoomDeviceRef.current !== device) {
@@ -581,8 +607,78 @@ export default function RealOrCamera() {
     captureRequested.setBlocking(true);
   };
 
+  const disarmShutter = () => {
+    isShutterArmedRef.current = false;
+    setIsShutterArmed(false);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch(
+      (error: unknown) => {
+        console.warn('Unable to play shutter advance clunk.', error);
+      },
+    );
+  };
+
+  const playAdvanceRatchet = React.useCallback(async () => {
+    for (let index = 0; index < 3; index += 1) {
+      try {
+        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+      } catch (error: unknown) {
+        console.warn('Unable to play film-advance ratchet feedback.', error);
+        return;
+      }
+      if (index < 2) await new Promise<void>((resolve) => setTimeout(resolve, 55));
+    }
+  }, []);
+
+  const advanceFilm = React.useCallback(() => {
+    if (isShutterArmedRef.current) return;
+    isShutterArmedRef.current = true;
+    setIsShutterArmed(true);
+    leverProgress.value = withSpring(0, { damping: 14, stiffness: 180 });
+    void playAdvanceRatchet();
+  }, [leverProgress, playAdvanceRatchet]);
+
+  const filmAdvancePanResponder = React.useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => !isShutterArmedRef.current,
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          !isShutterArmedRef.current &&
+          gestureState.dx > 8 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onPanResponderGrant: () => {
+          leverProgress.value = 0;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const availableTravel = Math.max(1, leverTrackWidthRef.current - 36);
+          leverProgress.value = Math.min(
+            1,
+            Math.max(0, gestureState.dx / availableTravel),
+          );
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          const availableTravel = Math.max(1, leverTrackWidthRef.current - 36);
+          if (gestureState.dx / availableTravel >= 0.9) {
+            advanceFilm();
+          } else {
+            leverProgress.value = withSpring(0, {
+              damping: 14,
+              stiffness: 180,
+            });
+          }
+        },
+        onPanResponderTerminate: () => {
+          leverProgress.value = withSpring(0, {
+            damping: 14,
+            stiffness: 180,
+          });
+        },
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [advanceFilm, leverProgress],
+  );
+
   const handleShutter = () => {
-    if (!device || !hasPermission || isCapturing) return;
+    if (!device || !hasPermission || isCapturing || !isShutterArmed) return;
 
     if (mxMode) {
       if (!isAwaitingSecondExposure) {
@@ -606,11 +702,7 @@ export default function RealOrCamera() {
         return;
       }
 
-      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
-        (error: unknown) => {
-          console.warn('Unable to play second MX shutter haptic feedback.', error);
-        },
-      );
+      disarmShutter();
       if (statusTimeout.current) clearTimeout(statusTimeout.current);
       setIsCapturing(true);
       setIsAwaitingSecondExposure(false);
@@ -621,11 +713,7 @@ export default function RealOrCamera() {
       return;
     }
 
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
-      (error: unknown) => {
-        console.warn('Unable to play shutter haptic feedback.', error);
-      },
-    );
+    disarmShutter();
     liveMxMix.setBlocking(0);
     void takePhoto();
   };
@@ -693,7 +781,7 @@ export default function RealOrCamera() {
     setExposure(newEV);
   };
   const selectLens = (lensOption: typeof lens) => {
-    void Haptics.selectionAsync().catch((error: unknown) => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch((error: unknown) => {
       console.warn('Unable to play lens selection haptic feedback.', error);
     });
     setLens(lensOption);
@@ -790,12 +878,25 @@ export default function RealOrCamera() {
           </Text>
         </View>
         <View style={styles.lcdPanel}>
-          <Text style={styles.lcdReadout}>[ {24 - (photosTaken % 24)} EXP ]</Text>
-          <View style={styles.lcdDivider} />
-          <Text style={styles.lcdBadge}>
-            {FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
-              'FILM'}
+          <Text style={styles.lcdReadout}>
+            {isShutterArmed ? `[ ${24 - (photosTaken % 24)} EXP ]` : '[ UNWOUND ]'}
           </Text>
+          <View style={styles.lcdDivider} />
+          <View
+            style={[
+              styles.dxWindow,
+              { backgroundColor: FILM_DX_COLORS[filmProfile].backgroundColor },
+            ]}
+          >
+            <Text
+              style={[
+                styles.dxWindowText,
+                { color: FILM_DX_COLORS[filmProfile].textColor },
+              ]}
+            >
+              {activeFilm?.name ?? 'FILM'}
+            </Text>
+          </View>
           <View
             style={styles.batteryBadge}
             accessibilityLabel="Battery indicator"
@@ -1006,69 +1107,66 @@ export default function RealOrCamera() {
           </Pressable>
         </View>
         <View style={styles.effectOptions}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ checked: halationEnabled }}
-            onPress={() => toggleEffect(setHalationEnabled)}
-            style={({ pressed }) => [
-              styles.buttonInactive,
-              styles.effectButtonLayout,
-              halationEnabled && styles.buttonActive,
-              pressed && styles.controlButtonPressed,
-            ]}
-          >
-            <Text
-              style={[
-                styles.textInactive,
-                halationEnabled && styles.textActive,
+          <View style={styles.effectSwitch}>
+            <Text style={styles.effectEtching}>HLTN</Text>
+            <Pressable
+              accessibilityLabel={`Halation ${halationEnabled ? 'on' : 'off'}`}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: halationEnabled }}
+              onPress={() => toggleEffect(setHalationEnabled)}
+              style={({ pressed }) => [
+                styles.effectButton,
+                pressed && styles.controlButtonPressed,
               ]}
             >
-              Halation {halationEnabled ? 'On' : 'Off'}
-            </Text>
-            {halationEnabled ? <View style={styles.activeIndicator} /> : null}
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ checked: grainEnabled }}
-            onPress={() => toggleEffect(setGrainEnabled)}
-            style={({ pressed }) => [
-              styles.buttonInactive,
-              styles.effectButtonLayout,
-              grainEnabled && styles.buttonActive,
-              pressed && styles.controlButtonPressed,
-            ]}
-          >
-            <Text
-              style={[
-                styles.textInactive,
-                grainEnabled && styles.textActive,
+              <View
+                style={[
+                  styles.effectLed,
+                  halationEnabled ? styles.effectLedActive : styles.effectLedInactive,
+                ]}
+              />
+            </Pressable>
+          </View>
+          <View style={styles.effectSwitch}>
+            <Text style={styles.effectEtching}>GRN</Text>
+            <Pressable
+              accessibilityLabel={`Grain ${grainEnabled ? 'on' : 'off'}`}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: grainEnabled }}
+              onPress={() => toggleEffect(setGrainEnabled)}
+              style={({ pressed }) => [
+                styles.effectButton,
+                pressed && styles.controlButtonPressed,
               ]}
             >
-              Grain {grainEnabled ? 'On' : 'Off'}
-            </Text>
-            {grainEnabled ? <View style={styles.activeIndicator} /> : null}
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ checked: vignetteEnabled }}
-            onPress={() => toggleEffect(setVignetteEnabled)}
-            style={({ pressed }) => [
-              styles.buttonInactive,
-              styles.effectButtonLayout,
-              vignetteEnabled && styles.buttonActive,
-              pressed && styles.controlButtonPressed,
-            ]}
-          >
-            <Text
-              style={[
-                styles.textInactive,
-                vignetteEnabled && styles.textActive,
+              <View
+                style={[
+                  styles.effectLed,
+                  grainEnabled ? styles.effectLedActive : styles.effectLedInactive,
+                ]}
+              />
+            </Pressable>
+          </View>
+          <View style={styles.effectSwitch}>
+            <Text style={styles.effectEtching}>VGNT</Text>
+            <Pressable
+              accessibilityLabel={`Vignette ${vignetteEnabled ? 'on' : 'off'}`}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: vignetteEnabled }}
+              onPress={() => toggleEffect(setVignetteEnabled)}
+              style={({ pressed }) => [
+                styles.effectButton,
+                pressed && styles.controlButtonPressed,
               ]}
             >
-              Vignette {vignetteEnabled ? 'On' : 'Off'}
-            </Text>
-            {vignetteEnabled ? <View style={styles.activeIndicator} /> : null}
-          </Pressable>
+              <View
+                style={[
+                  styles.effectLed,
+                  vignetteEnabled ? styles.effectLedActive : styles.effectLedInactive,
+                ]}
+              />
+            </Pressable>
+          </View>
         </View>
         <View style={styles.bottomDeck}>
           <TouchableOpacity
@@ -1125,32 +1223,74 @@ export default function RealOrCamera() {
           <View style={styles.deckSpacer} />
         </View>
       </View>
-      <View style={styles.shutterDeck}>
-        <Text style={[styles.meterLabel, styles.etchedLabel]}>BULB</Text>
-        <Pressable
-          accessibilityLabel="Take photo"
-          accessibilityRole="button"
-          disabled={isCapturing}
-          onPressIn={() => {
-            shutterScale.value = withSpring(0.84, {
-              damping: 14,
-              stiffness: 320,
-            });
-          }}
-          onPressOut={() => {
-            shutterScale.value = withSpring(1, {
-              damping: 10,
-              stiffness: 260,
-            });
-          }}
-          onPress={handleShutter}
-          style={[styles.shutterOuter, isCapturing && styles.shutterDisabled]}
-        >
-          <Animated.View
-            style={[styles.shutterInner, shutterAnimatedStyle]}
-          />
-        </Pressable>
-        <Text style={[styles.meterLabel, styles.etchedLabel]}>AUTO</Text>
+      <View style={styles.shutterAssembly}>
+        <View style={styles.advanceLeverRow}>
+          <Text style={[styles.meterLabel, styles.etchedLabel]}>
+            FILM ADVANCE
+          </Text>
+          <View
+            accessible
+            accessibilityLabel={
+              isShutterArmed
+                ? 'Film advanced, shutter ready'
+                : 'Swipe right to advance film and arm shutter'
+            }
+            accessibilityRole="button"
+            onAccessibilityTap={advanceFilm}
+            onLayout={(event) => {
+              const width = event.nativeEvent.layout.width;
+              leverTrackWidthRef.current = width;
+              setLeverTrackWidth(width);
+            }}
+            style={styles.advanceTrack}
+            {...filmAdvancePanResponder.panHandlers}
+          >
+            <View pointerEvents="none" style={styles.advanceTrackGroove} />
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.advanceThumb,
+                isShutterArmed && styles.advanceThumbReady,
+                leverAnimatedStyle,
+              ]}
+            />
+            <Text pointerEvents="none" style={styles.advanceTrackLabel}>
+              {isShutterArmed ? 'READY' : 'SWIPE  →'}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.shutterDeck}>
+          <Text style={[styles.meterLabel, styles.etchedLabel]}>
+            {isShutterArmed ? 'BULB' : '[ UNWOUND ]'}
+          </Text>
+          <Pressable
+            accessibilityLabel="Take photo"
+            accessibilityRole="button"
+            disabled={isCapturing || !isShutterArmed}
+            onPressIn={() => {
+              shutterScale.value = withSpring(0.84, {
+                damping: 14,
+                stiffness: 320,
+              });
+            }}
+            onPressOut={() => {
+              shutterScale.value = withSpring(1, {
+                damping: 10,
+                stiffness: 260,
+              });
+            }}
+            onPress={handleShutter}
+            style={[
+              styles.shutterOuter,
+              (isCapturing || !isShutterArmed) && styles.shutterDisabled,
+            ]}
+          >
+            <Animated.View
+              style={[styles.shutterInner, shutterAnimatedStyle]}
+            />
+          </Pressable>
+          <Text style={[styles.meterLabel, styles.etchedLabel]}>AUTO</Text>
+        </View>
       </View>
       <Modal
         visible={archiveVisible}
@@ -1248,6 +1388,21 @@ const styles = StyleSheet.create({
     width: 1,
     height: 18,
     backgroundColor: '#54401f',
+  },
+  dxWindow: {
+    maxWidth: 96,
+    paddingVertical: 4,
+    paddingHorizontal: 5,
+    borderTopWidth: 1,
+    borderTopColor: '#ffffff80',
+    borderBottomWidth: 2,
+    borderBottomColor: '#00000088',
+    borderRadius: 2,
+  },
+  dxWindowText: {
+    fontSize: 7,
+    fontWeight: '900',
+    letterSpacing: 0.35,
   },
   lcdBadge: {
     maxWidth: 90,
@@ -1572,19 +1727,59 @@ const styles = StyleSheet.create({
   effectOptions: {
     flexDirection: 'row',
     justifyContent: 'center',
+    gap: 22,
     marginBottom: 8,
   },
-  effectButtonLayout: {
-    minHeight: 34,
-    paddingVertical: 6,
-    paddingHorizontal: 7,
-    marginHorizontal: 3,
+  effectSwitch: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  effectEtching: {
+    color: '#6e6e73',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  effectButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    borderWidth: 1,
+    borderTopColor: '#4d4d50',
+    borderLeftColor: '#39393c',
+    borderRightColor: '#090909',
+    borderBottomColor: '#080808',
+    backgroundColor: '#171719',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.75,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  effectLed: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  effectLedActive: {
+    backgroundColor: '#ff9500',
+    shadowColor: '#ff9500',
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  effectLedInactive: {
+    backgroundColor: '#3a3a3c',
+    borderWidth: 1,
+    borderColor: '#242426',
   },
   lensSelector: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 5,
+    gap: 0,
     padding: 4,
     borderWidth: 1,
     borderColor: '#454547',
@@ -1711,8 +1906,66 @@ const styles = StyleSheet.create({
   deckSpacer: {
     width: 48,
   },
+  shutterAssembly: {
+    backgroundColor: '#1c1c1e',
+  },
+  advanceLeverRow: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    paddingHorizontal: 16,
+    backgroundColor: '#171719',
+  },
+  advanceTrack: {
+    width: 166,
+    height: 28,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#080808',
+    borderRadius: 14,
+    backgroundColor: '#101011',
+  },
+  advanceTrackGroove: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: '#3a3a3c',
+  },
+  advanceThumb: {
+    position: 'absolute',
+    left: 2,
+    width: 24,
+    height: 22,
+    borderWidth: 1,
+    borderTopColor: '#858589',
+    borderLeftColor: '#626266',
+    borderRightColor: '#161618',
+    borderBottomColor: '#080808',
+    borderRadius: 11,
+    backgroundColor: '#48484a',
+    elevation: 3,
+  },
+  advanceThumbReady: {
+    backgroundColor: '#79602f',
+    borderTopColor: '#c9a45c',
+  },
+  advanceTrackLabel: {
+    position: 'absolute',
+    alignSelf: 'center',
+    color: '#8e8e93',
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
   shutterDeck: {
-    minHeight: 88,
+    minHeight: 78,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-evenly',
