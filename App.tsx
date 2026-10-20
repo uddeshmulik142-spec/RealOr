@@ -72,7 +72,12 @@ export default function RealOrCamera() {
   });
   const defaultBackDevice = useCameraDevice('back');
   const device = multiLensDevice ?? defaultBackDevice;
-  const [zoom, setZoom] = useState(() => getNeutralZoomFactor(device));
+  const base1x = getNeutralZoomFactor(device);
+  const zoom05x = device?.minZoom ?? base1x * 0.5;
+  const zoom1x = device ? clampZoom(base1x, device) : base1x;
+  const zoom2x = device ? clampZoom(base1x * 2, device) : base1x * 2;
+  const zoom5x = device ? clampZoom(base1x * 5, device) : base1x * 5;
+  const [zoom, setZoom] = useState(zoom1x);
   const animatedZoom = useSharedValue(zoom);
   const [exposure, setExposure] = useState<number>(0);
   const exposureTouchStart = useRef<{ x: number; y: number } | null>(null);
@@ -121,18 +126,18 @@ export default function RealOrCamera() {
     maxExposure,
     Math.max(minExposure, exposure),
   );
-  const neutralZoom = getNeutralZoomFactor(device);
   const zoomFactors = {
-    '0.5x': device ? device.minZoom : 0.5 * neutralZoom,
-    '1x': device ? clampZoom(neutralZoom, device) : neutralZoom,
-    '2x': device ? clampZoom(neutralZoom * 2, device) : neutralZoom * 2,
-    '5x': device ? clampZoom(neutralZoom * 5, device) : neutralZoom * 5,
+    '0.5x': device ? clampZoom(zoom05x, device) : zoom05x,
+    '1x': zoom1x,
+    '2x': zoom2x,
+    '5x': zoom5x,
   };
 
   useEffect(() => {
     if (!device) return;
-    setZoom(clampZoom(neutralZoom, device));
-  }, [device, neutralZoom]);
+    setZoom(zoom1x);
+    animatedZoom.value = zoom1x;
+  }, [animatedZoom, device, zoom1x]);
 
   useEffect(() => {
     animatedZoom.value = withTiming(zoom, { duration: 350 });
@@ -406,11 +411,7 @@ export default function RealOrCamera() {
       console.warn('Unable to play lens selection haptic feedback.', error);
     });
     setLens(lensOption);
-    setZoom(
-      lensOption === '0.5x' && device
-        ? device.minZoom
-        : zoomFactors[lensOption],
-    );
+    setZoom(zoomFactors[lensOption]);
   };
   const selectFilmProfile = (profile: FilmProfile) => {
     void Haptics.selectionAsync().catch((error: unknown) => {
