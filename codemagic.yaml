@@ -11,17 +11,24 @@ workflows:
         script: npx expo prebuild --platform ios
       - name: Build Unsigned IPA
         script: |
+          set -euo pipefail
           cd ios
           # Force Xcode to build for generic iOS device destination into an explicit output path
           xcodebuild -workspace $(ls -d *.xcworkspace) -scheme RealOr -configuration Release -destination "generic/platform=iOS" -derivedDataPath build/derivedData CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
 
           # Find and package the app bundle
           mkdir -p build/Payload
-          APP_PATH=$(find build/derivedData -name "RealOr.app" -type d | head -n 1)
+          APP_PATH=$(find build/derivedData -type d -name "RealOr.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "Build completed without producing RealOr.app under ios/build/derivedData." >&2
+            exit 1
+          fi
           echo "Found compiled app at: $APP_PATH"
 
           cp -R "$APP_PATH" build/Payload/
+          test -d build/Payload/RealOr.app
           cd build
           zip -r ../../RealOr.ipa Payload
+          test -s ../../RealOr.ipa
     artifacts:
       - RealOr.ipa
