@@ -13,22 +13,28 @@ workflows:
         script: |
           set -euo pipefail
 
-          # Find the workspace file dynamically from root
-          WORKSPACE=$(ls -d ios/*.xcworkspace | head -n 1)
+          # Verify ios directory exists
+          if [ ! -d "ios" ]; then
+            echo "Error: ios directory not found after prebuild"
+            exit 1
+          fi
+
+          cd ios
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
           echo "Using workspace: $WORKSPACE"
 
           xcodebuild archive \
             -workspace "$WORKSPACE" \
             -scheme RealOr \
             -configuration Release \
-            -archivePath ios/build/RealOr.xcarchive \
+            -archivePath build/RealOr.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_IDENTITY=""
 
-          mkdir -p ios/build/Payload
-          cp -R ios/build/RealOr.xcarchive/Products/Applications/*.app ios/build/Payload/
-          cd ios/build
+          mkdir -p build/Payload
+          cp -R build/RealOr.xcarchive/Products/Applications/*.app build/Payload/
+          cd build
           zip -r ../../RealOr.ipa Payload
           cd ../..
           test -s RealOr.ipa || (echo "RealOr.ipa was not generated" && exit 1)
