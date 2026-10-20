@@ -7,57 +7,14 @@ workflows:
     scripts:
       - name: Install dependencies
         script: npm install
-      - name: Expo Prebuild & Patch Podfile
-        script: |
-          set -e
-
-          # 1. Run prebuild but DON'T install pods yet
-          npx expo prebuild --platform ios --no-install
-
-          # 2. Safely inject the Nitro header fix into the Podfile using Ruby
-          cat << 'EOF' > patch.rb
-          path = 'ios/Podfile'
-          content = File.read(path)
-          patch = <<-PATCH
-            installer.pods_project.targets.each do |target|
-              target.build_configurations.each do |config|
-                config.build_settings['HEADER_SEARCH_PATHS'] ||= '$(inherited) '
-                config.build_settings['HEADER_SEARCH_PATHS'] << '"${PODS_ROOT}/Headers/Public/NitroModules" '
-                config.build_settings['HEADER_SEARCH_PATHS'] << '"${PODS_ROOT}/../../node_modules/react-native-nitro-modules/cpp" '
-              end
-            end
-          PATCH
-          content.sub!("post_install do |installer|", "post_install do |installer|\n" + patch)
-          File.write(path, content)
-          EOF
-          ruby patch.rb
-      - name: Install CocoaPods
-        script: |
-          set -e
-          cd ios
-          pod install --repo-update
+      - name: Expo Prebuild
+        script: npx expo prebuild --platform ios
       - name: Build Unsigned IPA
         script: |
           set -euo pipefail
-
-          if [ ! -d "ios" ]; then
-            echo "Error: ios directory not found"
-            exit 1
-          fi
-
           cd ios
-          WORKSPACE=$(ls -d *.xcworkspace | head -n 1 || true)
-
-          if [ -z "$WORKSPACE" ]; then
-            echo "CRITICAL ERROR: No .xcworkspace found! Here is what is inside the ios directory:"
-            ls -la
-            exit 1
-          fi
-
-          echo "Using workspace: $WORKSPACE"
-
           xcodebuild archive \
-            -workspace "$WORKSPACE" \
+            -workspace $(ls -d *.xcworkspace | head -n 1) \
             -scheme RealOr \
             -configuration Release \
             -archivePath build/RealOr.xcarchive \
