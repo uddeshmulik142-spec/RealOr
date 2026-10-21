@@ -790,6 +790,16 @@ export default function RealOrCamera() {
     [advanceFilm, leverProgress],
   );
 
+  const resetMxExposure = () => {
+    clearFirstExposureRequested.setBlocking(true);
+    firstExposureRequested.setBlocking(false);
+    finalExposureRequested.setBlocking(false);
+    captureRequested.setBlocking(false);
+    firstExposureAvailable.setBlocking(false);
+    liveMxMix.setBlocking(0);
+    setIsAwaitingSecondExposure(false);
+  };
+
   const handleShutter = () => {
     if (!device || !hasPermission || isCapturing || !isWoundRef.current) return;
 
@@ -815,6 +825,7 @@ export default function RealOrCamera() {
         return;
       }
 
+      resetMxExposure();
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
         (error: unknown) => {
           console.warn('Unable to play final MX shutter haptic feedback.', error);
@@ -852,13 +863,7 @@ export default function RealOrCamera() {
     ).catch((error: unknown) => {
       console.warn('Unable to play MX cancellation haptic feedback.', error);
     });
-    clearFirstExposureRequested.setBlocking(true);
-    firstExposureRequested.setBlocking(false);
-    finalExposureRequested.setBlocking(false);
-    captureRequested.setBlocking(false);
-    firstExposureAvailable.setBlocking(false);
-    liveMxMix.setBlocking(0);
-    setIsAwaitingSecondExposure(false);
+    resetMxExposure();
     setMxMode(false);
     setStatusMessage(null);
   };
@@ -1629,11 +1634,11 @@ export default function RealOrCamera() {
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+flex: 1,
     backgroundColor: '#121212',
-    // Respect iOS Dynamic Island / Status Bar at the top and Home Indicator at the bottom
-    paddingTop: 48, // Clears the Dynamic Island safely
-    paddingBottom: 24, // Clears the bottom home indicator bar
+    paddingTop: 54,     // Clears the Dynamic Island and status bar completely
+    paddingBottom: 28,  // Clears the bottom home indicator bar safely
+    paddingHorizontal: 10,
   },
   messageContainer: {
     flex: 1,
@@ -1754,14 +1759,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#ff9500',
   },
   viewfinderContainer: {
-    flex: 1,
-    width: '92%', // Leaves breathing room on the left/right edges like a real physical camera body
-    maxHeight: '66%', // Perfectly balanced: gives the optical feed dominance without crushing the bottom deck
+    width: '100%',
     aspectRatio: 0.75,
+    maxHeight: '54%',   // Perfectly balances the viewfinder so the control panels fit without crowding
     alignSelf: 'center',
     borderWidth: 3,
     borderColor: '#2c2c2e',
-    borderRadius: 12, // Modern iOS corner radius matching the hardware bezel
+    borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: '#050505',
   },
