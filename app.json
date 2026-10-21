@@ -12,7 +12,6 @@
         "NSCameraUsageDescription": "RealOr uses the camera to capture photos for analysis.",
         "NSPhotoLibraryAddUsageDescription": "RealOr saves developed photos to your camera roll.",
         "NSPhotoLibraryUsageDescription": "RealOr needs photo library access to save developed photos.",
-        "NSLocalNetworkUsageDescription": "RealOr shares your developed photos with a browser on your trusted local Wi-Fi network when the scanning station is open.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.uddeshmulik.RealOr"
