@@ -14,7 +14,7 @@ workflows:
           set -euo pipefail
           cd ios
           xcodebuild archive \
-            -workspace $(ls -d *.xcworkspace | head -n 1) \
+            -workspace $(ls -d *.xcworkspace) \
             -scheme RealOr \
             -configuration Release \
             -archivePath build/RealOr.xcarchive \
