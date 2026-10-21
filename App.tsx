@@ -3,7 +3,6 @@ import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withSpring,
-  withRepeat,
   withTiming,
 } from 'react-native-reanimated';
 import {
@@ -11,11 +10,11 @@ import {
   Modal,
   PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  useWindowDimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
@@ -61,6 +60,18 @@ const FILM_STOCKS: { id: FilmProfile; name: string }[] = [
   { id: 7, name: 'EKTACHROME' },
   { id: 8, name: 'AGFA VISTA' },
 ];
+const FILM_DX_COLORS: Record<FilmProfile, { backgroundColor: string; textColor: string }> = {
+  0: { backgroundColor: '#f2cf38', textColor: '#17130a' },
+  1: { backgroundColor: '#a8b7ad', textColor: '#101613' },
+  2: { backgroundColor: '#bd2525', textColor: '#fff4e4' },
+  3: { backgroundColor: '#d8ad45', textColor: '#17130a' },
+  4: { backgroundColor: '#73945a', textColor: '#10150c' },
+  5: { backgroundColor: '#f0eee5', textColor: '#111111' },
+  6: { backgroundColor: '#d9d7c9', textColor: '#111111' },
+  7: { backgroundColor: '#4f78ad', textColor: '#f5f5f7' },
+  8: { backgroundColor: '#dc7942', textColor: '#17100c' },
+};
+const exposureStops = [-2, -1, 0, 1, 2] as const;
 const PUSH_PULL_STOPS = [
   { value: -1, label: '-1' },
   { value: 0, label: 'BOX' },
@@ -147,7 +158,6 @@ function clampZoom(zoom: number, device: CameraDevice): number {
 }
 
 export default function RealOrCamera() {
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [lens, setLens] = useState<'0.5x' | '1x' | '2x' | '5x'>('1x');
   const multiLensDevice = useCameraDevice('back', {
     physicalDevices: ['ultra-wide-angle', 'wide-angle', 'telephoto'],
@@ -168,32 +178,25 @@ export default function RealOrCamera() {
   const shutterScale = useSharedValue(1);
   const [isWound, setIsWound] = useState(true);
   const isWoundRef = useRef(true);
+  const leverProgress = useSharedValue(0);
+  const [leverTrackWidth, setLeverTrackWidth] = useState(0);
+  const leverTrackWidthRef = useRef(0);
   const shutterAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: shutterScale.value }],
   }));
-  const [commandDialMode, setCommandDialMode] = useState<
-    'EV' | 'FOCUS' | 'DEV' | 'OPTICS'
-  >('EV');
-  const [activeGlassOverlay, setActiveGlassOverlay] = useState<
-    'film' | 'aspect' | 'mx' | null
-  >(null);
-  const [opticsIndex, setOpticsIndex] = useState(0);
-  const commandDialOpacity = useSharedValue(0.18);
-  const commandDialAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: commandDialOpacity.value,
+  const leverAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateX:
+          leverProgress.value * Math.max(0, leverTrackWidth - 36),
+      },
+    ],
   }));
-  const windPromptOpacity = useSharedValue(0);
-  const windPromptAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: windPromptOpacity.value,
-  }));
-  const commandDialTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const glassOverlayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const commandDialStartValue = useRef(0);
-  const commandDialLastHaptic = useRef(0);
-  const windGestureConsumed = useRef(false);
-  const viewfinderSize = useRef({ width: 0, height: 0 });
   const zoomDeviceRef = useRef(device);
   const [exposure, setExposure] = useState<number>(0);
+  const exposureTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const exposureStartY = useRef<number | null>(null);
+  const exposureStartValue = useRef(0);
   const lastHapticEV = useRef<number>(0);
   const { hasPermission, canRequestPermission, requestPermission } =
     useCameraPermission();
@@ -254,12 +257,15 @@ export default function RealOrCamera() {
   const [manualFocusActive, setManualFocusActive] = useState(false);
   const [focusDistance, setFocusDistance] = useState(0.5);
   const focusDistanceRef = useRef(0.5);
+  const focusStartValue = useRef(0.5);
+  const focusSliderWidth = useRef(0);
   const focusLastHapticValue = useRef(0.5);
   const [meterPoint, setMeterPoint] = useState<{ x: number; y: number } | null>(
     null,
   );
   const [activeZoneLabel, setActiveZoneLabel] = useState('--');
   const activeZone = useSharedValue<string>('--');
+  const viewfinderSize = useRef({ width: 0, height: 0 });
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('3:4');
   const [mxMode, setMxMode] = useState(false);
   const [isAwaitingSecondExposure, setIsAwaitingSecondExposure] =
@@ -277,14 +283,6 @@ export default function RealOrCamera() {
     maxExposure,
     Math.max(minExposure, exposure),
   );
-  const commandDialModeRef = useRef(commandDialMode);
-  commandDialModeRef.current = commandDialMode;
-  const boundedExposureRef = useRef(boundedExposure);
-  boundedExposureRef.current = boundedExposure;
-  const pushPullRef = useRef(pushPull);
-  pushPullRef.current = pushPull;
-  const opticsIndexRef = useRef(opticsIndex);
-  opticsIndexRef.current = opticsIndex;
   const activeFilm = FILM_STOCKS.find((profile) => profile.id === filmProfile);
   useEffect(() => {
     if (!device) return;
@@ -691,17 +689,9 @@ export default function RealOrCamera() {
   useEffect(
     () => () => {
       if (statusTimeout.current) clearTimeout(statusTimeout.current);
-      if (commandDialTimer.current) clearTimeout(commandDialTimer.current);
-      if (glassOverlayTimer.current) clearTimeout(glassOverlayTimer.current);
     },
     [],
   );
-
-  useEffect(() => {
-    windPromptOpacity.value = isWound
-      ? withTiming(0, { duration: 180 })
-      : withRepeat(withTiming(0.9, { duration: 900 }), -1, true);
-  }, [isWound, windPromptOpacity]);
 
   useEffect(() => {
     if (!hasPermission && canRequestPermission) {
@@ -752,48 +742,52 @@ export default function RealOrCamera() {
     if (isWoundRef.current) return;
     isWoundRef.current = true;
     setIsWound(true);
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid)
-      .then(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light))
-      .catch((error: unknown) => {
+    leverProgress.value = withSpring(0, { damping: 14, stiffness: 180 });
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch(
+      (error: unknown) => {
         console.warn('Unable to play film-advance ratchet feedback.', error);
-      });
-  }, []);
+      },
+    );
+  }, [leverProgress]);
 
-  const windPanResponder = React.useMemo(
+  const filmAdvancePanResponder = React.useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, gestureState) => {
-          const startX = gestureState.x0;
-          const startY = gestureState.y0;
-          const isBelowMidpoint = startY >= screenHeight * 0.5;
-          const isCommandControl =
-            startX >= screenWidth - 220 &&
-            startY >= screenHeight - 480 &&
-            startY <= screenHeight - 200;
-          const isBottomControl = startY >= screenHeight - 205;
-          return (
-            !isWoundRef.current &&
-            isBelowMidpoint &&
-            !isCommandControl &&
-            !isBottomControl &&
-            gestureState.dx > 15 &&
-            Math.abs(gestureState.dx) > Math.abs(gestureState.dy)
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          !isWoundRef.current &&
+          gestureState.dx > 8 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onPanResponderGrant: () => {
+          leverProgress.value = 0;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const availableTravel = Math.max(1, leverTrackWidthRef.current - 36);
+          leverProgress.value = Math.min(
+            1,
+            Math.max(0, gestureState.dx / availableTravel),
           );
         },
-        onPanResponderGrant: () => {
-          windGestureConsumed.current = true;
-        },
         onPanResponderRelease: (_, gestureState) => {
-          if (gestureState.dx > 70) advanceFilm();
-          windGestureConsumed.current = false;
+          const availableTravel = Math.max(1, leverTrackWidthRef.current - 36);
+          if (gestureState.dx / availableTravel >= 0.9) {
+            advanceFilm();
+          } else {
+            leverProgress.value = withSpring(0, {
+              damping: 14,
+              stiffness: 180,
+            });
+          }
         },
         onPanResponderTerminate: () => {
-          windGestureConsumed.current = false;
+          leverProgress.value = withSpring(0, {
+            damping: 14,
+            stiffness: 180,
+          });
         },
         onPanResponderTerminationRequest: () => false,
       }),
-    [advanceFilm, screenHeight, screenWidth],
+    [advanceFilm, leverProgress],
   );
 
   const handleShutter = () => {
@@ -880,19 +874,33 @@ export default function RealOrCamera() {
     setMxMode(true);
   };
 
-  const selectExposure = React.useCallback((value: number) => {
-    if (!device) return;
-    const newEV = Math.round(
-      Math.min(maxExposure, Math.max(minExposure, value)) * 10,
-    ) / 10;
+  const updateExposureFromDrag = (pageY: number) => {
+    if (exposureStartY.current === null || !device) return;
+
+    const nextExposure =
+      exposureStartValue.current - (pageY - exposureStartY.current) / 80;
+    const clampedExposure = Math.min(
+      maxExposure,
+      Math.max(minExposure, nextExposure),
+    );
+    const newEV = Math.round(clampedExposure * 10) / 10;
     if (Math.abs(newEV - lastHapticEV.current) >= 0.1) {
       void Haptics.selectionAsync().catch((error: unknown) => {
         console.warn('Unable to play exposure detent haptic feedback.', error);
       });
+      lastHapticEV.current = newEV;
     }
+    setExposure(newEV);
+  };
+
+  const selectExposure = (value: number) => {
+    if (!device) return;
+    const newEV = Math.round(
+      Math.min(maxExposure, Math.max(minExposure, value)) * 10,
+    ) / 10;
     lastHapticEV.current = newEV;
     setExposure(newEV);
-  }, [device, maxExposure, minExposure]);
+  };
   const updateFocusDistance = React.useCallback((value: number) => {
     const nextFocusDistance = Math.min(1, Math.max(0, value));
     focusDistanceRef.current = nextFocusDistance;
@@ -905,23 +913,31 @@ export default function RealOrCamera() {
       });
     }
   }, []);
-  const revealCommandDial = React.useCallback(() => {
-    if (commandDialTimer.current) clearTimeout(commandDialTimer.current);
-    commandDialOpacity.value = withTiming(1, { duration: 120 });
-    commandDialTimer.current = setTimeout(() => {
-      commandDialOpacity.value = withTiming(0.18, { duration: 500 });
-    }, 1800);
-  }, [commandDialOpacity]);
-  const openGlassOverlay = (overlay: 'film' | 'aspect' | 'mx') => {
-    if (glassOverlayTimer.current) clearTimeout(glassOverlayTimer.current);
-    setActiveGlassOverlay(overlay);
-    glassOverlayTimer.current = setTimeout(() => {
-      setActiveGlassOverlay(null);
-    }, 1800);
-  };
-  const closeGlassOverlay = () => {
-    if (glassOverlayTimer.current) clearTimeout(glassOverlayTimer.current);
-    setActiveGlassOverlay(null);
+  const focusPanResponder = React.useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => manualFocusActive,
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          manualFocusActive &&
+          Math.abs(gestureState.dx) > 4 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+        onPanResponderGrant: () => {
+          focusStartValue.current = focusDistanceRef.current;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const rangeWidth = Math.max(1, focusSliderWidth.current);
+          updateFocusDistance(
+            focusStartValue.current + gestureState.dx / rangeWidth,
+          );
+        },
+      }),
+    [manualFocusActive, updateFocusDistance],
+  );
+  const toggleManualFocus = () => {
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play focus mode selection feedback.', error);
+    });
+    setManualFocusActive((active) => !active);
   };
   const selectLens = (lensOption: typeof lens) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch((error: unknown) => {
@@ -936,14 +952,14 @@ export default function RealOrCamera() {
     });
     setFilmProfile(profile);
   };
-  const selectPushPull = React.useCallback((value: number) => {
+  const selectPushPull = (value: number) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch(
       (error: unknown) => {
         console.warn('Unable to play development dial haptic feedback.', error);
       },
     );
     setPushPull(value);
-  }, []);
+  };
   const toggleEffect = (
     setEnabled: (update: (enabled: boolean) => boolean) => void,
   ) => {
@@ -952,134 +968,16 @@ export default function RealOrCamera() {
     });
     setEnabled((enabled) => !enabled);
   };
-  const opticLabels = ['HALATION', 'GRAIN', 'VIGNETTE'] as const;
-  const toggleSelectedOptic = () => {
-    if (opticsIndex === 0) toggleEffect(setHalationEnabled);
-    else if (opticsIndex === 1) toggleEffect(setGrainEnabled);
-    else toggleEffect(setVignetteEnabled);
-    revealCommandDial();
-  };
-  const getCommandDialValue = () => {
-    switch (commandDialMode) {
-      case 'EV':
-        return `EV ${boundedExposure >= 0 ? '+' : ''}${boundedExposure.toFixed(1)}`;
-      case 'FOCUS':
-        return `${manualFocusActive ? 'MF' : 'AF'} ${focusDistance.toFixed(2)}`;
-      case 'DEV':
-        return pushPull === 0 ? 'BOX' : `${pushPull > 0 ? '+' : ''}${pushPull}`;
-      default: {
-        const enabled =
-          opticsIndex === 0
-            ? halationEnabled
-            : opticsIndex === 1
-              ? grainEnabled
-              : vignetteEnabled;
-        return `${opticLabels[opticsIndex]} ${enabled ? 'ON' : 'OFF'}`;
-      }
-    }
-  };
-  const commandDialPosition =
-    commandDialMode === 'EV'
-      ? ((boundedExposure + 2) / 4) * 100
-      : commandDialMode === 'FOCUS'
-        ? focusDistance * 100
-        : commandDialMode === 'DEV'
-          ? ((PUSH_PULL_STOPS.findIndex((stop) => stop.value === pushPull) || 0) /
-              (PUSH_PULL_STOPS.length - 1)) *
-            100
-          : (opticsIndex / (opticLabels.length - 1)) * 100;
-  const commandDialPanResponder = React.useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, gestureState) =>
-          Math.abs(gestureState.dy) > 4 &&
-          Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
-        onPanResponderGrant: () => {
-          commandDialLastHaptic.current = 0;
-          const mode = commandDialModeRef.current;
-          if (mode === 'EV') {
-            commandDialStartValue.current = boundedExposureRef.current;
-          } else if (mode === 'FOCUS') {
-            commandDialStartValue.current = focusDistanceRef.current;
-            setManualFocusActive(true);
-          } else if (mode === 'DEV') {
-            commandDialStartValue.current = PUSH_PULL_STOPS.findIndex(
-              (stop) => stop.value === pushPullRef.current,
-            );
-          } else {
-            commandDialStartValue.current = opticsIndexRef.current;
-          }
-          revealCommandDial();
-        },
-        onPanResponderMove: (_, gestureState) => {
-          const delta = -gestureState.dy;
-          const mode = commandDialModeRef.current;
-          if (mode === 'EV') {
-            const next = Math.round(
-              (commandDialStartValue.current + delta * 0.01) * 10,
-            ) / 10;
-            selectExposure(next);
-          } else if (mode === 'FOCUS') {
-            updateFocusDistance(commandDialStartValue.current + delta * 0.005);
-          } else if (mode === 'DEV') {
-            const nextIndex = Math.max(
-              0,
-              Math.min(
-                PUSH_PULL_STOPS.length - 1,
-                Math.round(commandDialStartValue.current + delta / 42),
-              ),
-            );
-            const nextValue = PUSH_PULL_STOPS[nextIndex].value;
-            if (nextIndex !== commandDialLastHaptic.current) {
-              commandDialLastHaptic.current = nextIndex;
-              selectPushPull(nextValue);
-            }
-          } else {
-            const nextIndex = Math.max(
-              0,
-              Math.min(
-                opticLabels.length - 1,
-                Math.round(commandDialStartValue.current + delta / 48),
-              ),
-            );
-            if (nextIndex !== opticsIndexRef.current) {
-              opticsIndexRef.current = nextIndex;
-              setOpticsIndex(nextIndex);
-              void Haptics.selectionAsync().catch((error: unknown) => {
-                console.warn('Unable to play optics detent haptic feedback.', error);
-              });
-            }
-          }
-          revealCommandDial();
-        },
-        onPanResponderRelease: revealCommandDial,
-        onPanResponderTerminate: revealCommandDial,
-      }),
-    [revealCommandDial, selectExposure, selectPushPull, updateFocusDistance],
+  const selectedExposureStop = exposureStops.reduce((nearest, stop) =>
+    Math.abs(stop - boundedExposure) < Math.abs(nearest - boundedExposure)
+      ? stop
+      : nearest,
   );
-  const selectCommandDialMode = (
-    mode: 'EV' | 'FOCUS' | 'DEV' | 'OPTICS',
-  ) => {
-    if (mode === 'FOCUS' && commandDialMode === 'FOCUS') {
-      setManualFocusActive((active) => !active);
-    } else if (mode === 'FOCUS') {
-      setManualFocusActive(true);
-    }
-    setCommandDialMode(mode);
-    void Haptics.selectionAsync().catch((error: unknown) => {
-      console.warn('Unable to play command dial mode haptic feedback.', error);
-    });
-    revealCommandDial();
-  };
   const targetRatioNum = getAspectRatioValue(aspectRatio);
-  const screenRatio = screenWidth / Math.max(1, screenHeight);
-  const cropWidth =
-    screenRatio > targetRatioNum ? screenHeight * targetRatioNum : screenWidth;
-  const cropHeight =
-    screenRatio > targetRatioNum ? screenHeight : screenWidth / targetRatioNum;
-  const matteLeft = Math.max(0, (screenWidth - cropWidth) / 2);
-  const matteTop = Math.max(0, (screenHeight - cropHeight) / 2);
+  const bladeHeightPercent = Math.max(
+    0,
+    ((1 - 0.75 / targetRatioNum) / 2) * 100,
+  );
 
   if (!hasPermission) {
     return (
@@ -1106,412 +1004,614 @@ export default function RealOrCamera() {
 
   return (
     <View
-      style={styles.glassRoot}
-      onLayout={(event) => {
-        viewfinderSize.current = {
-          width: event.nativeEvent.layout.width,
-          height: event.nativeEvent.layout.height,
+      style={styles.container}
+      onTouchStart={(event) => {
+        exposureTouchStart.current = {
+          x: event.nativeEvent.pageX,
+          y: event.nativeEvent.pageY,
         };
       }}
-      {...windPanResponder.panHandlers}
+      onMoveShouldSetResponder={(event) => {
+        const touchStart = exposureTouchStart.current;
+        if (!touchStart) return false;
+        const dx = event.nativeEvent.pageX - touchStart.x;
+        const dy = event.nativeEvent.pageY - touchStart.y;
+        return Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx);
+      }}
+      onResponderGrant={(event) => {
+        exposureStartY.current =
+          exposureTouchStart.current?.y ?? event.nativeEvent.pageY;
+        exposureStartValue.current = boundedExposure;
+      }}
+      onResponderMove={(event) =>
+        updateExposureFromDrag(event.nativeEvent.pageY)
+      }
+      onResponderRelease={() => {
+        exposureStartY.current = null;
+        exposureTouchStart.current = null;
+      }}
+      onResponderTerminate={() => {
+        exposureStartY.current = null;
+        exposureTouchStart.current = null;
+      }}
     >
       <StatusBar style="light" />
-      <SkiaCamera
-        style={StyleSheet.absoluteFill}
-        device={device}
-        isActive={!archiveVisible}
-        allowHapticsAndSystemSoundsPlayback
-        zoom={animatedZoom}
-        constraints={[{ photoHDR: false }]}
-        targetResolution={targetResolution}
-        onFrame={renderFilmFrame}
-        onError={(error) => setErrorMessage(error.message)}
-      />
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Spot meter; tap to sample the scene"
-        style={StyleSheet.absoluteFill}
-        onPress={(event) => {
-          if (windGestureConsumed.current) return;
-          const { width, height } = viewfinderSize.current;
-          if (width <= 0 || height <= 0) return;
-          setMeterPoint({
-            x: Math.min(
-              0.999,
-              Math.max(0.001, event.nativeEvent.locationX / width),
-            ),
-            y: Math.min(
-              0.999,
-              Math.max(0.001, event.nativeEvent.locationY / height),
-            ),
-          });
-          setActiveZoneLabel('METERING...');
-          activeZone.value = 'METERING...';
-          meterSampleRequested.setBlocking(true);
-          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
-            (error: unknown) => {
-              console.warn('Unable to play spot-meter haptic feedback.', error);
-            },
-          );
-        }}
-      />
-      {matteTop > 0 ? (
-        <View
-          pointerEvents="none"
-          style={[
-            styles.glassMatte,
-            { top: 0, left: 0, right: 0, height: matteTop },
-          ]}
-        />
-      ) : null}
-      {matteTop > 0 ? (
-        <View
-          pointerEvents="none"
-          style={[
-            styles.glassMatte,
-            { bottom: 0, left: 0, right: 0, height: matteTop },
-          ]}
-        />
-      ) : null}
-      {matteLeft > 0 ? (
-        <View
-          pointerEvents="none"
-          style={[
-            styles.glassMatte,
-            { top: matteTop, bottom: matteTop, left: 0, width: matteLeft },
-          ]}
-        />
-      ) : null}
-      {matteLeft > 0 ? (
-        <View
-          pointerEvents="none"
-          style={[
-            styles.glassMatte,
-            { top: matteTop, bottom: matteTop, right: 0, width: matteLeft },
-          ]}
-        />
-      ) : null}
-      <View
-        pointerEvents="none"
-        style={[
-          styles.glassFrameline,
-          { left: matteLeft, top: matteTop, width: cropWidth, height: cropHeight },
-        ]}
-      />
-      {meterPoint ? (
-        <View
-          pointerEvents="none"
-          style={[
-            styles.meterReticle,
-            {
-              left: meterPoint.x * screenWidth - 17,
-              top: meterPoint.y * screenHeight - 17,
-            },
-          ]}
-        >
-          <View style={styles.meterReticleCircle} />
-          <View style={styles.meterReticleHorizontal} />
-          <View style={styles.meterReticleVertical} />
-        </View>
-      ) : null}
-
-      <View pointerEvents="box-none" style={styles.ghostHud}>
-        <View style={styles.ghostHudTopRow}>
-          <Text style={styles.ghostText}>
-            FRAME {String(photosTaken + 1).padStart(2, '0')}
-          </Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Reset exposure to zero"
-            onPress={() => selectExposure(0)}
-          >
-            <Text numberOfLines={1} style={styles.ghostText}>
-              {activeZoneLabel === '--'
-                ? 'ZONE V'
-                : activeZoneLabel.split(' (')[0]}{' '}
-              | EV {boundedExposure >= 0 ? '+' : ''}
-              {boundedExposure.toFixed(1)}
-            </Text>
-          </Pressable>
-        </View>
-        <View style={styles.ghostPills}>
-          <Pressable
-            style={styles.ghostPill}
-            onPress={() => openGlassOverlay('film')}
-          >
-            <Text numberOfLines={1} style={styles.ghostPillText}>
-              {`[ ${activeFilm?.name ?? 'FILM'} \u25BE ]`}
-            </Text>
-          </Pressable>
-          <Pressable
-            style={styles.ghostPill}
-            onPress={() => openGlassOverlay('aspect')}
-          >
-            <Text style={styles.ghostPillText}>[ {aspectRatio} ]</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="switch"
-            accessibilityState={{ checked: mxMode }}
-            style={[
-              styles.ghostPill,
-              mxMode && styles.ghostPillActive,
-            ]}
-            onPress={() => openGlassOverlay('mx')}
-          >
-            <Text style={styles.ghostPillText}>
-              [ MX{isAwaitingSecondExposure ? ' - 2ND' : ''} ]
-            </Text>
-          </Pressable>
-        </View>
-      </View>
-
-      {activeGlassOverlay ? (
-        <View pointerEvents="box-none" style={styles.glassPopupLayer}>
-          <View style={styles.glassPopup}>
-            <View style={styles.glassPopupHeader}>
-              <Text style={styles.glassPopupTitle}>
-                {activeGlassOverlay === 'film'
-                  ? 'FILM STOCK'
-                  : activeGlassOverlay === 'aspect'
-                    ? 'FRAME LINES'
-                    : 'MX DOUBLE EXPOSURE'}
-              </Text>
-              <Pressable
-                accessibilityLabel="Close selection"
-                onPress={closeGlassOverlay}
-              >
-                <Text style={styles.ghostText}>CLOSE X</Text>
-              </Pressable>
-            </View>
-            {activeGlassOverlay === 'film' ? (
-              <View style={styles.glassChoiceGrid}>
-                {FILM_STOCKS.map((stock) => (
-                  <Pressable
-                    key={stock.id}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: filmProfile === stock.id }}
-                    style={[
-                      styles.glassChoice,
-                      filmProfile === stock.id && styles.glassChoiceActive,
-                    ]}
-                    onPress={() => {
-                      selectFilmProfile(stock.id);
-                      closeGlassOverlay();
-                    }}
-                  >
-                    <Text style={styles.glassChoiceText}>{stock.name}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-            {activeGlassOverlay === 'aspect' ? (
-              <View style={styles.glassChoiceGrid}>
-                {aspectRatios.map((ratio) => (
-                  <Pressable
-                    key={ratio}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: aspectRatio === ratio }}
-                    style={[
-                      styles.glassChoice,
-                      aspectRatio === ratio && styles.glassChoiceActive,
-                    ]}
-                    onPress={() => {
-                      selectAspectRatio(ratio);
-                      closeGlassOverlay();
-                    }}
-                  >
-                    <Text style={styles.glassChoiceText}>{ratio}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-            {activeGlassOverlay === 'mx' ? (
-              <View style={styles.mxPopupActions}>
-                <Text style={styles.glassPopupHint}>
-                  {isAwaitingSecondExposure
-                    ? 'FIRST FRAME HELD - PRESS AGAIN FOR THE FINAL EXPOSURE'
-                    : 'LAYER TWO EXPOSURES ON ONE NEGATIVE'}
-                </Text>
-                <Pressable
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: mxMode }}
-                  disabled={isCapturing}
-                  style={[
-                    styles.glassChoice,
-                    mxMode && styles.glassChoiceActive,
-                  ]}
-                  onPress={() => {
-                    toggleMxMode();
-                    closeGlassOverlay();
-                  }}
-                >
-                  <Text style={styles.glassChoiceText}>
-                    {isAwaitingSecondExposure
-                      ? 'CANCEL MX'
-                      : mxMode
-                        ? 'DISABLE MX'
-                        : 'ENABLE MX'}
-                  </Text>
-                </Pressable>
-              </View>
-            ) : null}
-          </View>
-        </View>
-      ) : null}
-
-      <Animated.View pointerEvents="box-none" style={[styles.commandDial, commandDialAnimatedStyle]}>
-        <View style={styles.commandDialReadout}>
-          <Text numberOfLines={1} style={styles.commandDialValue}>
-            {getCommandDialValue()}
+      <View style={styles.topPlate}>
+        <View style={styles.brandMark}>
+          <View style={styles.brandDot} />
+          <Text style={styles.brandText}>REALOR</Text>
+          <Text style={[styles.brandEdition, styles.etchedLabel]}>
+            RANGEFINDER · 35
           </Text>
         </View>
-        <Pressable
-          accessibilityRole="adjustable"
-          accessibilityLabel={`${commandDialMode} command dial`}
-          accessibilityValue={{ text: getCommandDialValue() }}
-          onPress={() =>
-            commandDialMode === 'OPTICS'
-              ? toggleSelectedOptic()
-              : revealCommandDial()
-          }
-          style={styles.commandDialTrack}
-          {...commandDialPanResponder.panHandlers}
-        >
-          <View pointerEvents="none" style={styles.commandDialRail} />
-          {Array.from({ length: 13 }, (_, index) => (
-            <View
-              key={index}
-              pointerEvents="none"
-              style={[
-                styles.commandDialTick,
-                index % 3 === 0 && styles.commandDialMajorTick,
-                { top: `${(index / 12) * 100}%` },
-              ]}
-            />
-          ))}
+        <View style={styles.lcdPanel}>
+          <Text style={styles.lcdReadout}>
+            {isWound ? `[ ${24 - (photosTaken % 24)} EXP ]` : '[ UNWOUND ]'}
+          </Text>
+          <View style={styles.lcdDivider} />
           <View
-            pointerEvents="none"
             style={[
-              styles.commandDialMarker,
-              { top: `${Math.max(0, Math.min(100, commandDialPosition))}%` },
-            ]}
-          />
-        </Pressable>
-      </Animated.View>
-      <View style={styles.commandModeRow}>
-        {(['EV', 'FOCUS', 'DEV', 'OPTICS'] as const).map((mode) => (
-          <Pressable
-            key={mode}
-            accessibilityRole="button"
-            accessibilityState={{ selected: commandDialMode === mode }}
-            style={[
-              styles.commandModePill,
-              commandDialMode === mode && styles.commandModePillActive,
-            ]}
-            onPress={() => selectCommandDialMode(mode)}
-          >
-            <Text style={styles.commandModeText}>[ {mode} ]</Text>
-          </Pressable>
-        ))}
-      </View>
-      {commandDialMode === 'OPTICS' ? (
-        <Pressable
-          style={styles.opticsQuickToggle}
-          onPress={toggleSelectedOptic}
-        >
-          <Text style={styles.opticsQuickToggleText}>
-            TAP DIAL TO TOGGLE {opticLabels[opticsIndex]}
-          </Text>
-        </Pressable>
-      ) : null}
-      {errorMessage || statusMessage ? (
-        <View pointerEvents="none" style={styles.glassNotice}>
-          <Text style={errorMessage ? styles.glassErrorText : styles.ghostText}>
-            {errorMessage ?? statusMessage}
-          </Text>
-        </View>
-      ) : null}
-      {!isWound ? (
-        <Animated.Text
-          pointerEvents="none"
-          style={[styles.windPrompt, windPromptAnimatedStyle]}
-        >
-          [ SWIPE RIGHT TO WIND ]
-        </Animated.Text>
-      ) : null}
-
-      <TouchableOpacity
-        accessibilityLabel="Open photo archive"
-        accessibilityRole="button"
-        onPress={() => setArchiveVisible(true)}
-        style={styles.floatingArchiveThumb}
-      >
-        {latestPhotoUri ? (
-          <Image
-            source={{ uri: latestPhotoUri }}
-            resizeMode="cover"
-            style={styles.galleryImage}
-          />
-        ) : (
-          <Text style={styles.galleryPlaceholder}>ROLL</Text>
-        )}
-      </TouchableOpacity>
-      <View style={styles.floatingLensTurret}>
-        {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => (
-          <Pressable
-            key={lensOption}
-            accessibilityRole="button"
-            accessibilityLabel={`Select ${lensOption} lens`}
-            accessibilityState={{ selected: lens === lensOption }}
-            onPress={() => selectLens(lensOption)}
-            style={[
-              styles.floatingLensDetent,
-              lens === lensOption && styles.floatingLensDetentActive,
+              styles.dxWindow,
+              { backgroundColor: FILM_DX_COLORS[filmProfile].backgroundColor },
             ]}
           >
             <Text
               style={[
-                styles.floatingLensText,
-                lens === lensOption && styles.floatingLensTextActive,
+                styles.dxWindowText,
+                { color: FILM_DX_COLORS[filmProfile].textColor },
               ]}
             >
-              {lensOption}
+              {activeFilm?.name ?? 'FILM'}
+            </Text>
+          </View>
+          <View
+            style={styles.batteryBadge}
+            accessibilityLabel="Battery indicator"
+          >
+            <View style={styles.batteryCell} />
+            <View style={styles.batteryCell} />
+            <View style={styles.batteryCell} />
+          </View>
+          <Text style={styles.lcdReadout}>
+            EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
+          </Text>
+          <Animated.Text
+            accessibilityLabel={`Spot meter ${activeZoneLabel}`}
+            numberOfLines={1}
+            style={styles.zoneReadout}
+          >
+            {activeZoneLabel}
+          </Animated.Text>
+        </View>
+      </View>
+
+      <View style={styles.viewfinderContainer}>
+        <View
+          style={styles.viewfinder}
+          onLayout={(event) => {
+            viewfinderSize.current = {
+              width: event.nativeEvent.layout.width,
+              height: event.nativeEvent.layout.height,
+            };
+          }}
+        >
+          <SkiaCamera
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive={!archiveVisible}
+            allowHapticsAndSystemSoundsPlayback
+            zoom={animatedZoom}
+            constraints={[{ photoHDR: false }]}
+            targetResolution={targetResolution}
+            onFrame={renderFilmFrame}
+            onError={(error) => setErrorMessage(error.message)}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Spot meter; tap to sample the scene"
+            onPress={(event) => {
+              const { width, height } = viewfinderSize.current;
+              if (width <= 0 || height <= 0) return;
+              const x = Math.min(
+                0.999,
+                Math.max(0.001, event.nativeEvent.locationX / width),
+              );
+              const y = Math.min(
+                0.999,
+                Math.max(0.001, event.nativeEvent.locationY / height),
+              );
+              setMeterPoint({ x, y });
+              setActiveZoneLabel('METERING…');
+              activeZone.value = 'METERING…';
+              meterSampleRequested.setBlocking(true);
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                (error: unknown) => {
+                  console.warn('Unable to play spot-meter haptic feedback.', error);
+                },
+              );
+            }}
+            style={StyleSheet.absoluteFill}
+          />
+          {bladeHeightPercent > 0 ? (
+            <>
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.matteBlade,
+                  { top: 0, height: `${bladeHeightPercent}%` },
+                ]}
+              />
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.matteBlade,
+                  { bottom: 0, height: `${bladeHeightPercent}%` },
+                ]}
+              />
+            </>
+          ) : null}
+          <View pointerEvents="none" style={styles.framelineCorners}>
+            <View style={[styles.framelineCorner, styles.framelineTopLeft]} />
+            <View style={[styles.framelineCorner, styles.framelineTopRight]} />
+            <View style={[styles.framelineCorner, styles.framelineBottomLeft]} />
+            <View style={[styles.framelineCorner, styles.framelineBottomRight]} />
+          </View>
+          <View pointerEvents="none" style={styles.viewfinderTopLine}>
+            <Text style={styles.viewfinderLabel}>FRAME 01</Text>
+            <View style={styles.liveDot} />
+          </View>
+          <View
+            style={styles.exposureIndicator}
+            accessibilityLabel={`Exposure ${boundedExposure >= 0 ? '+' : ''}${boundedExposure.toFixed(1)} EV`}
+          >
+            <Text style={styles.exposureValue}>
+              EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
+            </Text>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Reset exposure to zero"
+              onPress={() => selectExposure(0)}
+              style={styles.exposureReset}
+            >
+              <Text style={styles.exposureResetText}>RESET</Text>
+            </TouchableOpacity>
+            <View style={styles.exposureScale}>
+              {exposureStops.map((stop) => {
+                const isSelected = selectedExposureStop === stop;
+                const label = `${stop > 0 ? '+' : ''}${stop}`;
+                return (
+                  <TouchableOpacity
+                    key={stop}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Set exposure to ${label} EV`}
+                    accessibilityState={{ selected: isSelected }}
+                    onPress={() => selectExposure(stop)}
+                    style={styles.exposureTickButton}
+                  >
+                    <Text
+                      style={[
+                        styles.exposureTickLabel,
+                        isSelected && styles.exposureTickLabelSelected,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                    <View
+                      style={[
+                        styles.exposureTick,
+                        isSelected && styles.exposureTickSelected,
+                      ]}
+                    />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+          <View pointerEvents="none" style={styles.viewfinderBottomLine}>
+            <Text style={styles.viewfinderLabel}>
+              {manualFocusActive
+                ? `MF · ${focusDistance.toFixed(2)}`
+                : 'AF · AE LOCK'}
+            </Text>
+            <Text style={styles.viewfinderLabel}>{lens}</Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={styles.controls}>
+        {errorMessage ? (
+          <Text style={styles.error} accessibilityRole="alert">
+            {errorMessage}
+          </Text>
+        ) : null}
+        {statusMessage ? (
+          <Text style={styles.status} accessibilityRole="status">
+            {statusMessage}
+          </Text>
+        ) : null}
+        <View style={styles.controlSection}>
+          <Text style={[styles.sectionLabel, styles.etchedLabel]}>FILM STOCK</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.filmScroller}
+            contentContainerStyle={styles.filmOptions}
+          >
+            {FILM_STOCKS.map((stock) => {
+              const isSelected = filmProfile === stock.id;
+              return (
+                <Pressable
+                  key={stock.id}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => selectFilmProfile(stock.id)}
+                  style={({ pressed }) => [
+                    styles.buttonInactive,
+                    styles.filmButton,
+                    isSelected && styles.filmButtonActive,
+                    pressed && styles.controlButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.textInactive,
+                      isSelected && styles.filmTextActive,
+                      styles.filmText,
+                    ]}
+                  >
+                    {stock.name}
+                  </Text>
+                  {isSelected ? <View style={styles.activeIndicator} /> : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+        <View style={styles.developmentRow}>
+          <Text style={[styles.sectionLabel, styles.etchedLabel]}>
+            DEVELOPMENT
+          </Text>
+          <View style={styles.developmentSelector}>
+            {PUSH_PULL_STOPS.map((stop) => {
+              const isSelected = pushPull === stop.value;
+              return (
+                <Pressable
+                  key={stop.value}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    stop.value === -1
+                      ? 'Pull one stop'
+                      : stop.value === 0
+                        ? 'Box speed, normal development'
+                        : `Push ${stop.value} stop${stop.value > 1 ? 's' : ''}`
+                  }
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => selectPushPull(stop.value)}
+                  style={({ pressed }) => [
+                    styles.developmentButton,
+                    isSelected && styles.developmentButtonActive,
+                    pressed && styles.controlButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.developmentButtonText,
+                      isSelected && styles.developmentButtonTextActive,
+                    ]}
+                  >
+                    {stop.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+        <View style={styles.focusControlSection}>
+          <View style={styles.focusControlHeader}>
+            <Text style={[styles.sectionLabel, styles.etchedLabel]}>
+              LENS FOCUS RING
+            </Text>
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityLabel={`Manual focus ${manualFocusActive ? 'on' : 'off'}`}
+              accessibilityState={{ checked: manualFocusActive }}
+              onPress={toggleManualFocus}
+              style={({ pressed }) => [
+                styles.focusModeButton,
+                manualFocusActive && styles.focusModeButtonActive,
+                pressed && styles.controlButtonPressed,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.focusModeText,
+                  manualFocusActive && styles.focusModeTextActive,
+                ]}
+              >
+                FOCUS: {manualFocusActive ? 'MAN' : 'AUTO'}
+              </Text>
+            </Pressable>
+          </View>
+          {manualFocusActive ? (
+            <View style={styles.focusSliderRow}>
+              <Text style={styles.focusEndpoint}>MACRO</Text>
+              <View
+                accessible
+                accessibilityRole="adjustable"
+                accessibilityLabel="Manual focus distance"
+                accessibilityValue={{
+                  min: 0,
+                  max: 1,
+                  now: focusDistance,
+                  text: focusDistance.toFixed(2),
+                }}
+                onLayout={(event) => {
+                  focusSliderWidth.current = event.nativeEvent.layout.width;
+                }}
+                style={styles.focusSliderTrack}
+                {...focusPanResponder.panHandlers}
+              >
+                <View pointerEvents="none" style={styles.focusSliderGroove} />
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.focusSliderFill,
+                    { width: `${focusDistance * 100}%` },
+                  ]}
+                />
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.focusSliderThumb,
+                    { left: `${focusDistance * 100}%` },
+                  ]}
+                />
+              </View>
+              <Text style={styles.focusEndpoint}>∞</Text>
+            </View>
+          ) : null}
+        </View>
+        <View style={styles.captureOptions}>
+          <Text style={styles.captureOptionLabel}>MATTE</Text>
+          <View style={styles.ratioOptions}>
+            {aspectRatios.map((ratio) => {
+              const isSelected = aspectRatio === ratio;
+              return (
+                <Pressable
+                  key={ratio}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Set crop ratio ${ratio}`}
+                  accessibilityState={{ selected: isSelected }}
+                  onPress={() => selectAspectRatio(ratio)}
+                  style={({ pressed }) => [
+                    styles.ratioButton,
+                    isSelected && styles.ratioButtonActive,
+                    pressed && styles.controlButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.ratioButtonText,
+                      isSelected && styles.ratioButtonTextActive,
+                    ]}
+                  >
+                    {ratio}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              isAwaitingSecondExposure
+                ? 'Cancel double exposure'
+                : `Toggle MX double exposure${mxMode ? ' on' : ' off'}`
+            }
+            accessibilityState={{ checked: mxMode }}
+            disabled={isCapturing}
+            onPress={toggleMxMode}
+            style={({ pressed }) => [
+              styles.mxButton,
+              mxMode && styles.mxButtonActive,
+              pressed && styles.controlButtonPressed,
+            ]}
+          >
+            <Text style={[styles.mxButtonText, mxMode && styles.mxButtonTextActive]}>
+              {isAwaitingSecondExposure ? 'MX · 2ND' : `MX ${mxMode ? 'ON' : 'OFF'}`}
             </Text>
           </Pressable>
-        ))}
+        </View>
+        <View style={styles.effectOptions}>
+          <View style={styles.effectSwitch}>
+            <Text style={styles.effectEtching}>HLTN</Text>
+            <Pressable
+              accessibilityLabel={`Halation ${halationEnabled ? 'on' : 'off'}`}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: halationEnabled }}
+              onPress={() => toggleEffect(setHalationEnabled)}
+              style={({ pressed }) => [
+                styles.effectButton,
+                pressed && styles.controlButtonPressed,
+              ]}
+            >
+              <View
+                style={[
+                  styles.effectLed,
+                  halationEnabled ? styles.effectLedActive : styles.effectLedInactive,
+                ]}
+              />
+            </Pressable>
+          </View>
+          <View style={styles.effectSwitch}>
+            <Text style={styles.effectEtching}>GRN</Text>
+            <Pressable
+              accessibilityLabel={`Grain ${grainEnabled ? 'on' : 'off'}`}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: grainEnabled }}
+              onPress={() => toggleEffect(setGrainEnabled)}
+              style={({ pressed }) => [
+                styles.effectButton,
+                pressed && styles.controlButtonPressed,
+              ]}
+            >
+              <View
+                style={[
+                  styles.effectLed,
+                  grainEnabled ? styles.effectLedActive : styles.effectLedInactive,
+                ]}
+              />
+            </Pressable>
+          </View>
+          <View style={styles.effectSwitch}>
+            <Text style={styles.effectEtching}>VGNT</Text>
+            <Pressable
+              accessibilityLabel={`Vignette ${vignetteEnabled ? 'on' : 'off'}`}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: vignetteEnabled }}
+              onPress={() => toggleEffect(setVignetteEnabled)}
+              style={({ pressed }) => [
+                styles.effectButton,
+                pressed && styles.controlButtonPressed,
+              ]}
+            >
+              <View
+                style={[
+                  styles.effectLed,
+                  vignetteEnabled ? styles.effectLedActive : styles.effectLedInactive,
+                ]}
+              />
+            </Pressable>
+          </View>
+        </View>
+        <View style={styles.bottomDeck}>
+          <TouchableOpacity
+            accessibilityLabel="Open photo archive"
+            accessibilityRole="button"
+            onPress={() => setArchiveVisible(true)}
+            style={styles.galleryThumbnail}
+          >
+            {latestPhotoUri ? (
+              <Image
+                source={{ uri: latestPhotoUri }}
+                resizeMode="cover"
+                style={styles.galleryImage}
+              />
+            ) : (
+              <Text style={styles.galleryPlaceholder}>ROLL</Text>
+            )}
+          </TouchableOpacity>
+          <View style={styles.lensCluster}>
+            <Text style={[styles.sectionLabel, styles.etchedLabel]}>
+              FOCAL LENGTH
+            </Text>
+            <View style={styles.lensSelector}>
+              {(['0.5x', '1x', '2x', '5x'] as const).map((lensOption) => {
+                const isSelected = lens === lensOption;
+                return (
+                  <Pressable
+                    key={lensOption}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Select ${lensOption} lens`}
+                    accessibilityState={{ selected: isSelected }}
+                    onPress={() => selectLens(lensOption)}
+                    style={({ pressed }) => [
+                      styles.buttonInactive,
+                      styles.lensButtonLayout,
+                      isSelected && styles.buttonActive,
+                      pressed && styles.controlButtonPressed,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.textInactive,
+                        isSelected && styles.textActive,
+                      ]}
+                    >
+                      {lensOption}
+                    </Text>
+                    {isSelected ? <View style={styles.activeIndicator} /> : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+          <View style={styles.deckSpacer} />
+        </View>
       </View>
-      <View style={styles.floatingShutterAssembly}>
-        <Pressable
-          accessibilityLabel="Take photo"
-          accessibilityRole="button"
-          disabled={isCapturing || !isWound}
-          onPressIn={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
-              (error: unknown) => {
-                console.warn('Unable to play half-press haptic feedback.', error);
-              },
-            );
-            shutterScale.value = withSpring(0.86, {
-              damping: 14,
-              stiffness: 320,
-            });
-          }}
-          onPressOut={() => {
-            shutterScale.value = withSpring(1, {
-              damping: 10,
-              stiffness: 260,
-            });
-          }}
-          onPress={handleShutter}
-          style={[
-            styles.titaniumShutter,
-            (!isWound || isCapturing) && styles.titaniumShutterLocked,
-          ]}
-        >
-          <Animated.View
-            style={[styles.titaniumShutterCore, shutterAnimatedStyle]}
-          />
-        </Pressable>
+      <View style={styles.shutterAssembly}>
+        <View style={styles.advanceLeverRow}>
+          <Text style={[styles.meterLabel, styles.etchedLabel]}>
+            FILM ADVANCE
+          </Text>
+          <View
+            accessible
+            accessibilityLabel={
+              isWound
+                ? 'Film advanced, shutter ready'
+                : 'Swipe right to advance film and wind shutter'
+            }
+            accessibilityRole="button"
+            onAccessibilityTap={advanceFilm}
+            onLayout={(event) => {
+              const width = event.nativeEvent.layout.width;
+              leverTrackWidthRef.current = width;
+              setLeverTrackWidth(width);
+            }}
+            style={styles.advanceTrack}
+            {...filmAdvancePanResponder.panHandlers}
+          >
+            <View pointerEvents="none" style={styles.advanceTrackGroove} />
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.advanceThumb,
+                isWound && styles.advanceThumbReady,
+                leverAnimatedStyle,
+              ]}
+            />
+            <Text pointerEvents="none" style={styles.advanceTrackLabel}>
+              {isWound ? '[ READY ]' : 'SWIPE  →'}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.shutterDeck}>
+          <Text style={[styles.meterLabel, styles.etchedLabel]}>
+            {isWound ? 'BULB' : '[ UNWOUND ]'}
+          </Text>
+          <Pressable
+            accessibilityLabel="Take photo"
+            accessibilityRole="button"
+            disabled={isCapturing || !isWound}
+            onPressIn={() => {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                (error: unknown) => {
+                  console.warn('Unable to play half-press haptic feedback.', error);
+                },
+              );
+              shutterScale.value = withSpring(0.84, {
+                damping: 14,
+                stiffness: 320,
+              });
+            }}
+            onPressOut={() => {
+              shutterScale.value = withSpring(1, {
+                damping: 10,
+                stiffness: 260,
+              });
+            }}
+            onPress={handleShutter}
+            style={[
+              styles.shutterOuter,
+              (isCapturing || !isWound) && styles.shutterDisabled,
+            ]}
+          >
+            <Animated.View
+              style={[styles.shutterInner, shutterAnimatedStyle]}
+            />
+          </Pressable>
+          <Text style={[styles.meterLabel, styles.etchedLabel]}>AUTO</Text>
+        </View>
       </View>
       <Modal
         visible={archiveVisible}
@@ -1528,433 +1628,873 @@ export default function RealOrCamera() {
 }
 
 const styles = StyleSheet.create({
-  glassRoot: {
-    ...StyleSheet.absoluteFill,
-    overflow: 'hidden',
-    backgroundColor: '#08080a',
-  },
-  glassMatte: {
-    position: 'absolute',
-    zIndex: 2,
-    backgroundColor: 'rgba(8, 8, 10, 0.58)',
-  },
-  glassFrameline: {
-    position: 'absolute',
-    zIndex: 3,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 180, 70, 0.35)',
-  },
-  meterReticle: {
-    position: 'absolute',
-    zIndex: 4,
-    width: 34,
-    height: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  meterReticleCircle: {
-    width: 18,
-    height: 18,
-    borderWidth: 1,
-    borderColor: '#ffb000',
-    borderRadius: 9,
-  },
-  meterReticleHorizontal: {
-    position: 'absolute',
-    width: 34,
-    height: 1,
-    backgroundColor: '#ffb000',
-  },
-  meterReticleVertical: {
-    position: 'absolute',
-    width: 1,
-    height: 34,
-    backgroundColor: '#ffb000',
-  },
-  ghostHud: {
-    position: 'absolute',
-    zIndex: 5,
-    top: 68,
-    left: 18,
-    right: 18,
-    gap: 11,
-  },
-  ghostHudTopRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 10,
-  },
-  ghostText: {
-    color: '#ffb000',
-    fontFamily: 'Menlo',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 1,
-    textShadowColor: 'rgba(0,0,0,0.85)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 6,
-  },
-  ghostPills: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-  },
-  ghostPill: {
-    maxWidth: '58%',
-    minHeight: 30,
-    justifyContent: 'center',
-    paddingHorizontal: 9,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.38)',
-    borderRadius: 16,
-    backgroundColor: 'rgba(8, 8, 10, 0.28)',
-  },
-  ghostPillActive: {
-    borderColor: '#ffb000',
-    backgroundColor: 'rgba(255, 176, 0, 0.18)',
-  },
-  ghostPillText: {
-    color: '#ff9f1c',
-    fontFamily: 'Menlo',
-    fontSize: 9,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    textShadowColor: 'rgba(0,0,0,0.85)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 6,
-  },
-  glassPopupLayer: {
-    ...StyleSheet.absoluteFill,
-    zIndex: 10,
-    alignItems: 'center',
-    paddingTop: 150,
-  },
-  glassPopup: {
-    width: '88%',
-    maxWidth: 380,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.38)',
-    borderRadius: 16,
-    backgroundColor: 'rgba(8, 8, 10, 0.78)',
-  },
-  glassPopupHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 13,
-  },
-  glassPopupTitle: {
-    color: '#ffb000',
-    fontFamily: 'Menlo',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1.5,
-    textShadowColor: 'rgba(0,0,0,0.85)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 6,
-  },
-  glassChoiceGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  glassChoice: {
-    minHeight: 36,
-    justifyContent: 'center',
-    paddingHorizontal: 11,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.3)',
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-  },
-  glassChoiceActive: {
-    borderColor: '#ffb000',
-    backgroundColor: 'rgba(255, 176, 0, 0.2)',
-  },
-  glassChoiceText: {
-    color: '#ffe3ab',
-    fontFamily: 'Menlo',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  mxPopupActions: {
-    alignItems: 'flex-start',
-    gap: 14,
-  },
-  glassPopupHint: {
-    color: '#e7d2ae',
-    fontFamily: 'Menlo',
-    fontSize: 10,
-    lineHeight: 16,
-  },
-  commandDial: {
-    position: 'absolute',
-    zIndex: 6,
-    right: 12,
-    bottom: 282,
-    width: 94,
-    height: 166,
-    alignItems: 'center',
-    gap: 8,
-  },
-  commandDialReadout: {
-    maxWidth: 94,
-    paddingHorizontal: 5,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(8,8,10,0.38)',
-  },
-  commandDialValue: {
-    color: '#ffb000',
-    fontFamily: 'Menlo',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.4,
-    textShadowColor: 'rgba(0,0,0,0.85)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 6,
-  },
-  commandDialTrack: {
-    width: 54,
+  container: {
     flex: 1,
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.34)',
-    borderRadius: 20,
-    backgroundColor: 'rgba(8,8,10,0.34)',
-  },
-  commandDialRail: {
-    position: 'absolute',
-    top: 8,
-    bottom: 8,
-    left: 26,
-    width: 1,
-    backgroundColor: 'rgba(255, 176, 0, 0.45)',
-  },
-  commandDialTick: {
-    position: 'absolute',
-    right: 9,
-    width: 9,
-    height: 1,
-    backgroundColor: 'rgba(255, 224, 173, 0.62)',
-  },
-  commandDialMajorTick: {
-    right: 5,
-    width: 13,
-    height: 2,
-    backgroundColor: '#ffb000',
-  },
-  commandDialMarker: {
-    position: 'absolute',
-    left: 16,
-    width: 23,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: '#fff0cc',
-    shadowColor: '#ffb000',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 6,
-  },
-  commandModeRow: {
-    position: 'absolute',
-    zIndex: 7,
-    right: 8,
-    bottom: 240,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-  },
-  commandModePill: {
-    minHeight: 28,
-    justifyContent: 'center',
-    paddingHorizontal: 5,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.3)',
-    borderRadius: 14,
-    backgroundColor: 'rgba(8,8,10,0.36)',
-  },
-  commandModePillActive: {
-    borderColor: '#ffb000',
-    backgroundColor: 'rgba(255,176,0,0.17)',
-  },
-  commandModeText: {
-    color: '#ffb000',
-    fontFamily: 'Menlo',
-    fontSize: 8,
-    fontWeight: '700',
-    textShadowColor: 'rgba(0,0,0,0.85)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 6,
-  },
-  opticsQuickToggle: {
-    position: 'absolute',
-    zIndex: 6,
-    right: 9,
-    bottom: 211,
-    paddingHorizontal: 6,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(8,8,10,0.38)',
-  },
-  opticsQuickToggleText: {
-    color: '#ffb000',
-    fontFamily: 'Menlo',
-    fontSize: 7,
-    letterSpacing: 0.3,
-  },
-  glassNotice: {
-    position: 'absolute',
-    zIndex: 8,
-    top: 124,
-    left: 16,
-    right: 16,
-    alignItems: 'center',
-    padding: 7,
-    borderRadius: 8,
-    backgroundColor: 'rgba(8,8,10,0.46)',
-  },
-  glassErrorText: {
-    color: '#ff7770',
-    fontFamily: 'Menlo',
-    fontSize: 10,
-    textAlign: 'center',
-  },
-  windPrompt: {
-    position: 'absolute',
-    zIndex: 6,
-    left: 16,
-    right: 16,
-    bottom: 229,
-    color: '#ffb000',
-    fontFamily: 'Menlo',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1.1,
-    textAlign: 'center',
-    textShadowColor: 'rgba(0,0,0,0.9)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 7,
-  },
-  floatingArchiveThumb: {
-    position: 'absolute',
-    zIndex: 8,
-    left: 16,
-    bottom: 42,
-    width: 48,
-    height: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 208, 136, 0.8)',
-    borderRadius: 8,
-    backgroundColor: 'rgba(8,8,10,0.55)',
-  },
-  floatingLensTurret: {
-    position: 'absolute',
-    zIndex: 8,
-    bottom: 142,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    padding: 5,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.35)',
-    borderRadius: 24,
-    backgroundColor: 'rgba(8,8,10,0.42)',
-  },
-  floatingLensDetent: {
-    minWidth: 48,
-    minHeight: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 18,
-  },
-  floatingLensDetentActive: {
-    borderWidth: 1,
-    borderColor: 'rgba(255, 176, 0, 0.75)',
-    backgroundColor: 'rgba(255, 176, 0, 0.2)',
-  },
-  floatingLensText: {
-    color: '#fff0d5',
-    fontFamily: 'Menlo',
-    fontSize: 10,
-    fontWeight: '700',
-    textShadowColor: 'rgba(0,0,0,0.9)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 5,
-  },
-  floatingLensTextActive: {
-    color: '#ffb000',
-  },
-  floatingShutterAssembly: {
-    position: 'absolute',
-    zIndex: 8,
-    bottom: 38,
-    alignSelf: 'center',
-  },
-  titaniumShutter: {
-    width: 78,
-    height: 78,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 39,
-    borderWidth: 5,
-    borderTopColor: '#ffffff',
-    borderLeftColor: '#d9dce0',
-    borderRightColor: '#747b84',
-    borderBottomColor: '#555b63',
-    backgroundColor: '#aeb4bc',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 9 },
-    shadowOpacity: 0.68,
-    shadowRadius: 13,
-    elevation: 12,
-  },
-  titaniumShutterCore: {
-    width: 51,
-    height: 51,
-    borderRadius: 26,
-    borderWidth: 4,
-    borderTopColor: '#ff8179',
-    borderLeftColor: '#b9262c',
-    borderRightColor: '#651116',
-    borderBottomColor: '#3e0a0e',
-    backgroundColor: '#a9151c',
-  },
-  titaniumShutterLocked: {
-    opacity: 0.42,
+    backgroundColor: '#121212',
+    paddingTop: 8,
   },
   messageContainer: {
-    ...StyleSheet.absoluteFill,
+    flex: 1,
+    backgroundColor: '#121212',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
-    backgroundColor: '#08080a',
   },
   message: {
-    color: '#f0e6d2',
+    color: '#e5e5ea',
     fontSize: 16,
     textAlign: 'center',
+  },
+  topPlate: {
+    minHeight: 76,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#050505',
+    backgroundColor: '#1c1c1e',
+  },
+  brandMark: {
+    alignItems: 'flex-start',
+  },
+  brandDot: {
+    width: 7,
+    height: 7,
+    marginBottom: 4,
+    borderRadius: 4,
+    backgroundColor: '#d32f2f',
+  },
+  brandText: {
+    color: '#e5e5ea',
+    fontSize: 17,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  brandEdition: {
+    marginTop: 3,
+    color: '#8e8e93',
+    fontSize: 7,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  lcdPanel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#373737',
+    borderRadius: 5,
+    backgroundColor: '#10100d',
+  },
+  lcdReadout: {
+    color: '#ff9500',
+    fontSize: 10,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.5,
+  },
+  zoneReadout: {
+    maxWidth: 92,
+    flexShrink: 1,
+    color: '#d4af37',
+    fontSize: 6,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.25,
+  },
+  lcdDivider: {
+    width: 1,
+    height: 18,
+    backgroundColor: '#54401f',
+  },
+  dxWindow: {
+    maxWidth: 96,
+    paddingVertical: 4,
+    paddingHorizontal: 5,
+    borderTopWidth: 1,
+    borderTopColor: '#ffffff80',
+    borderBottomWidth: 2,
+    borderBottomColor: '#00000088',
+    borderRadius: 2,
+  },
+  dxWindowText: {
+    fontSize: 7,
+    fontWeight: '900',
+    letterSpacing: 0.35,
+  },
+  lcdBadge: {
+    maxWidth: 90,
+    color: '#ffbf58',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  batteryBadge: {
+    width: 19,
+    height: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 2,
+    borderWidth: 1,
+    borderColor: '#ff9500',
+    borderRadius: 2,
+  },
+  batteryCell: {
+    flex: 1,
+    height: 5,
+    backgroundColor: '#ff9500',
+  },
+  viewfinderContainer: {
+    flex: 1,
+    width: '100%',
+    maxHeight: '58%',
+    aspectRatio: 0.75,
+    alignSelf: 'center',
+    borderWidth: 4,
+    borderTopColor: '#050505',
+    borderLeftColor: '#050505',
+    borderBottomColor: '#38383a',
+    borderRightColor: '#38383a',
+    borderRadius: 6,
+    overflow: 'hidden',
+    backgroundColor: '#050505',
+  },
+  viewfinder: {
+    flex: 1,
+    overflow: 'hidden',
+    backgroundColor: '#050505',
+  },
+  matteBlade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 5,
+    backgroundColor: '#050505',
+  },
+  framelineCorners: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    margin: 38,
+  },
+  framelineCorner: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    borderColor: '#ffffffbb',
+  },
+  framelineTopLeft: {
+    top: 0,
+    left: 0,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+  },
+  framelineTopRight: {
+    top: 0,
+    right: 0,
+    borderTopWidth: 1,
+    borderRightWidth: 1,
+  },
+  framelineBottomLeft: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+  },
+  framelineBottomRight: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: 1,
+    borderRightWidth: 1,
+  },
+  viewfinderTopLine: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 30,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#090909bb',
+  },
+  viewfinderBottomLine: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 30,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#090909bb',
+  },
+  viewfinderLabel: {
+    color: '#e5e5ea',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textShadowColor: 'rgba(255,255,255,0.12)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1,
+  },
+  etchedLabel: {
+    textShadowColor: 'rgba(255,255,255,0.12)',
+    textShadowOffset: { width: 0, height: 1 },
+  },
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#d32f2f',
+  },
+  controls: {
+    width: '100%',
+    paddingHorizontal: 18,
+    paddingTop: 8,
+    paddingBottom: 4,
+    backgroundColor: '#1c1c1e',
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+  },
+  controlSection: {
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  developmentRow: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 7,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderTopColor: '#454547',
+    borderLeftColor: '#333336',
+    borderRightColor: '#080808',
+    borderBottomColor: '#080808',
+    borderRadius: 5,
+    backgroundColor: '#151516',
+  },
+  developmentSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: '#090909',
+    borderRadius: 5,
+    backgroundColor: '#101011',
+  },
+  developmentButton: {
+    minWidth: 39,
+    minHeight: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    borderWidth: 1,
+    borderTopColor: '#4d4d50',
+    borderLeftColor: '#39393c',
+    borderRightColor: '#080808',
+    borderBottomWidth: 3,
+    borderBottomColor: '#080808',
+    borderRadius: 3,
+    backgroundColor: '#252527',
+  },
+  developmentButtonActive: {
+    borderTopColor: '#fff0b3',
+    borderLeftColor: '#d4af37',
+    borderRightColor: '#665019',
+    borderBottomColor: '#4c3a12',
+    backgroundColor: '#8a6b24',
+  },
+  developmentButtonText: {
+    color: '#a7a7ad',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  developmentButtonTextActive: {
+    color: '#fff7dd',
+  },
+  focusControlSection: {
+    width: '100%',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 7,
+    borderWidth: 1,
+    borderTopColor: '#454547',
+    borderLeftColor: '#333336',
+    borderRightColor: '#080808',
+    borderBottomColor: '#080808',
+    borderRadius: 5,
+    backgroundColor: '#151516',
+  },
+  focusControlHeader: {
+    minHeight: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  focusModeButton: {
+    minWidth: 86,
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 9,
+    borderWidth: 1,
+    borderTopColor: '#525256',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    borderBottomWidth: 3,
+    borderBottomColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#252527',
+  },
+  focusModeButtonActive: {
+    borderTopColor: '#e5ca8a',
+    borderLeftColor: '#b89042',
+    backgroundColor: '#3b301e',
+  },
+  focusModeText: {
+    color: '#a7a7ad',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+  },
+  focusModeTextActive: {
+    color: '#d4af37',
+  },
+  focusSliderRow: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 2,
+  },
+  focusEndpoint: {
+    width: 36,
+    color: '#8e8e93',
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  focusSliderTrack: {
+    flex: 1,
+    height: 30,
+    justifyContent: 'center',
+  },
+  focusSliderGroove: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 6,
+    borderWidth: 1,
+    borderColor: '#080808',
+    borderRadius: 3,
+    backgroundColor: '#3a3a3c',
+  },
+  focusSliderFill: {
+    position: 'absolute',
+    left: 0,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#8a6b24',
+  },
+  focusSliderThumb: {
+    position: 'absolute',
+    width: 20,
+    height: 26,
+    marginLeft: -10,
+    borderWidth: 1,
+    borderTopColor: '#f2dc9b',
+    borderLeftColor: '#c9a347',
+    borderRightColor: '#3f3217',
+    borderBottomWidth: 3,
+    borderBottomColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#a8842f',
+    elevation: 3,
+  },
+  captureOptions: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingHorizontal: 2,
+  },
+  captureOptionLabel: {
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.3,
+  },
+  ratioOptions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ratioButton: {
+    minWidth: 38,
+    minHeight: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+    borderWidth: 1,
+    borderTopWidth: 1.5,
+    borderBottomWidth: 3,
+    borderTopColor: '#535357',
+    borderBottomColor: '#080808',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#252527',
+  },
+  ratioButtonActive: {
+    borderTopColor: '#ffffff',
+    borderBottomColor: '#56565a',
+    borderLeftColor: '#f5f5f7',
+    borderRightColor: '#77777b',
+    backgroundColor: '#d4d4d6',
+  },
+  ratioButtonText: {
+    color: '#c7c7cc',
+    fontSize: 9,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  ratioButtonTextActive: {
+    color: '#121212',
+  },
+  mxButton: {
+    minWidth: 54,
+    minHeight: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 7,
+    borderWidth: 1,
+    borderTopWidth: 1.5,
+    borderBottomWidth: 3,
+    borderTopColor: '#535357',
+    borderBottomColor: '#080808',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    borderRadius: 4,
+    backgroundColor: '#252527',
+  },
+  mxButtonActive: {
+    borderTopColor: '#ffd27a',
+    borderBottomColor: '#6e3d00',
+    borderLeftColor: '#ff9500',
+    borderRightColor: '#6e3d00',
+    backgroundColor: '#3a2b15',
+  },
+  mxButtonText: {
+    color: '#c7c7cc',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  mxButtonTextActive: {
+    color: '#ffbf58',
+  },
+  sectionLabel: {
+    marginBottom: 6,
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
   galleryImage: {
     width: '100%',
     height: '100%',
   },
   galleryPlaceholder: {
-    color: '#ffb000',
+    color: '#ff9500',
     fontSize: 8,
     fontWeight: '800',
     letterSpacing: 1,
   },
+  status: {
+    color: '#ffbf58',
+    marginBottom: 6,
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  filmScroller: {
+    width: '100%',
+    flexGrow: 0,
+  },
+  filmOptions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 4,
+    borderWidth: 1,
+    borderColor: '#454547',
+    borderRadius: 9,
+    backgroundColor: '#111112',
+  },
+  buttonInactive: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 6,
+    borderTopWidth: 1.5,
+    borderBottomWidth: 4,
+    borderTopColor: '#535357',
+    borderBottomColor: '#080808',
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    backgroundColor: '#29292b',
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+  },
+  buttonActive: {
+    borderTopColor: '#ffd27a',
+    borderBottomColor: '#6e3d00',
+    borderLeftColor: '#ff9500',
+    borderRightColor: '#6e3d00',
+    backgroundColor: '#3a2b15',
+  },
+  filmButton: {
+    borderTopColor: '#f5f5f7',
+    paddingHorizontal: 9,
+    borderBottomColor: '#080808',
+    borderLeftColor: '#414145',
+    borderRightColor: '#080808',
+    backgroundColor: '#252527',
+    marginHorizontal: 2,
+  },
+  filmButtonActive: {
+    backgroundColor: '#d4d4d6',
+    borderTopColor: '#ffffff',
+    borderBottomColor: '#56565a',
+    borderLeftColor: '#f5f5f7',
+    borderRightColor: '#77777b',
+  },
+  filmText: {
+    fontSize: 9,
+    letterSpacing: 0.3,
+  },
+  filmTextActive: {
+    color: '#121212',
+  },
+  textInactive: {
+    color: '#c7c7cc',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  textActive: {
+    color: '#ffbf58',
+  },
+  effectOptions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 22,
+    marginBottom: 8,
+  },
+  effectSwitch: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  effectEtching: {
+    color: '#6e6e73',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  effectButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    borderWidth: 1,
+    borderTopColor: '#4d4d50',
+    borderLeftColor: '#39393c',
+    borderRightColor: '#090909',
+    borderBottomColor: '#080808',
+    backgroundColor: '#171719',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.75,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  effectLed: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  effectLedActive: {
+    backgroundColor: '#ff9500',
+    shadowColor: '#ff9500',
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  effectLedInactive: {
+    backgroundColor: '#3a3a3c',
+    borderWidth: 1,
+    borderColor: '#242426',
+  },
+  lensSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 0,
+    padding: 4,
+    borderWidth: 1,
+    borderColor: '#454547',
+    borderRadius: 20,
+    backgroundColor: '#111112',
+  },
+  lensButtonLayout: {
+    minWidth: 48,
+    justifyContent: 'center',
+    borderRadius: 16,
+    borderTopColor: '#77777b',
+    borderLeftColor: '#555557',
+    paddingHorizontal: 8,
+  },
+  activeIndicator: {
+    width: 5,
+    height: 5,
+    marginLeft: 5,
+    borderRadius: 3,
+    backgroundColor: '#ff9500',
+    shadowColor: '#ff9500',
+    shadowOpacity: 0.9,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  controlButtonPressed: {
+    transform: [{ translateY: 2 }],
+    borderBottomWidth: 2,
+  },
+  exposureIndicator: {
+    position: 'absolute',
+    right: 8,
+    top: '34%',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 7,
+    borderWidth: 1,
+    borderColor: '#ffffff33',
+    borderRadius: 8,
+    backgroundColor: '#111111d9',
+  },
+  exposureValue: {
+    color: '#ff9500',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'Courier',
+    fontVariant: ['tabular-nums'],
+  },
+  exposureReset: {
+    marginTop: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 4,
+    backgroundColor: '#ffffff18',
+  },
+  exposureResetText: {
+    color: '#c7c7cc',
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  exposureScale: {
+    marginTop: 5,
+    alignItems: 'center',
+  },
+  exposureTickButton: {
+    width: 44,
+    height: 27,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+  },
+  exposureTickLabel: {
+    minWidth: 15,
+    color: '#c7c7cc',
+    fontSize: 9,
+    fontFamily: 'Courier',
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+    textAlign: 'right',
+  },
+  exposureTickLabelSelected: {
+    color: '#ff9500',
+    fontWeight: '900',
+  },
+  exposureTick: {
+    width: 10,
+    height: 1,
+    backgroundColor: '#c7c7cc',
+  },
+  exposureTickSelected: {
+    width: 15,
+    height: 2,
+    backgroundColor: '#ff9500',
+  },
+  bottomDeck: {
+    minHeight: 65,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    backgroundColor: '#151516',
+    borderTopWidth: 1,
+    borderTopColor: '#080808',
+  },
+  galleryThumbnail: {
+    width: 48,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderRadius: 5,
+    borderWidth: 2,
+    borderTopColor: '#f1f1f3',
+    borderLeftColor: '#b8b8ba',
+    borderRightColor: '#777779',
+    borderBottomColor: '#777779',
+    backgroundColor: '#28282a',
+  },
+  lensCluster: {
+    alignItems: 'center',
+  },
+  deckSpacer: {
+    width: 48,
+  },
+  shutterAssembly: {
+    backgroundColor: '#1c1c1e',
+  },
+  advanceLeverRow: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    paddingHorizontal: 16,
+    backgroundColor: '#171719',
+  },
+  advanceTrack: {
+    width: 166,
+    height: 28,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#080808',
+    borderRadius: 14,
+    backgroundColor: '#101011',
+  },
+  advanceTrackGroove: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: '#3a3a3c',
+  },
+  advanceThumb: {
+    position: 'absolute',
+    left: 2,
+    width: 24,
+    height: 22,
+    borderWidth: 1,
+    borderTopColor: '#858589',
+    borderLeftColor: '#626266',
+    borderRightColor: '#161618',
+    borderBottomColor: '#080808',
+    borderRadius: 11,
+    backgroundColor: '#48484a',
+    elevation: 3,
+  },
+  advanceThumbReady: {
+    backgroundColor: '#79602f',
+    borderTopColor: '#c9a45c',
+  },
+  advanceTrackLabel: {
+    position: 'absolute',
+    alignSelf: 'center',
+    color: '#8e8e93',
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  shutterDeck: {
+    minHeight: 78,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    backgroundColor: '#1c1c1e',
+  },
+  meterLabel: {
+    color: '#8e8e93',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+  },
+  shutterOuter: {
+    width: 74,
+    height: 74,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 37,
+    borderWidth: 3,
+    borderTopColor: '#ffffff',
+    borderBottomColor: '#8e8e93',
+    borderLeftColor: '#c7c7cc',
+    borderRightColor: '#8e8e93',
+    backgroundColor: '#e5e5ea',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.55,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  shutterInner: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 4,
+    borderTopColor: '#8d1d1d',
+    borderLeftColor: '#b82828',
+    borderRightColor: '#631616',
+    borderBottomColor: '#551212',
+    backgroundColor: '#d32f2f',
+  },
+  shutterDisabled: {
+    opacity: 0.5,
+  },
   error: {
-    color: '#ff7770',
+    color: '#f2f2f7',
+    backgroundColor: '#9f2020',
     padding: 8,
+    marginBottom: 6,
     textAlign: 'center',
     fontSize: 11,
   },
