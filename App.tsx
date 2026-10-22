@@ -1634,11 +1634,11 @@ export default function RealOrCamera() {
 
 const styles = StyleSheet.create({
   container: {
-flex: 1,
+    flex: 1,
     backgroundColor: '#121212',
-    paddingTop: 54,     // Clears the Dynamic Island and status bar completely
-    paddingBottom: 28,  // Clears the bottom home indicator bar safely
-    paddingHorizontal: 10,
+    paddingTop: 48,
+    paddingBottom: 8,     // Reduced so the bottom doesn't waste space
+    paddingHorizontal: 8,
   },
   messageContainer: {
     flex: 1,
@@ -1761,11 +1761,11 @@ flex: 1,
   viewfinderContainer: {
     width: '100%',
     aspectRatio: 0.75,
-    maxHeight: '54%',   // Perfectly balances the viewfinder so the control panels fit without crowding
+    maxHeight: '48%',     // Slightly reduced height so controls get more breathing room
     alignSelf: 'center',
-    borderWidth: 3,
+    borderWidth: 2,
     borderColor: '#2c2c2e',
-    borderRadius: 12,
+    borderRadius: 8,
     overflow: 'hidden',
     backgroundColor: '#050505',
   },
@@ -1863,10 +1863,10 @@ flex: 1,
     backgroundColor: '#d32f2f',
   },
   controls: {
-  width: '100%',
-    paddingHorizontal: 16,
-    paddingTop: 2,
-    paddingBottom: 2,
+    width: '100%',
+    paddingHorizontal: 12,
+    paddingTop: 1,
+    paddingBottom: 1,
     backgroundColor: '#1c1c1e',
     borderTopWidth: 1,
     borderTopColor: '#38383a',
@@ -1874,7 +1874,7 @@ flex: 1,
   controlSection: {
     width: '100%',
     alignItems: 'center',
-    marginBottom: 2,
+    marginBottom: 1,      // Tightened margins
   },
   developmentRow: {
     minHeight: 32,
@@ -2431,7 +2431,7 @@ flex: 1,
     letterSpacing: 1.2,
   },
   shutterDeck: {
-    minHeight: 48,
+    height: 48,           // Fixed compact height for the bottom deck
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-evenly',
@@ -2446,9 +2446,9 @@ flex: 1,
     letterSpacing: 1.5,
   },
   shutterOuter: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
+    width: 44,            // Compact shutter size so it fits easily above home indicator
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#2c2c2e',
