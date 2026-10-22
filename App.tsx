@@ -78,6 +78,21 @@ const PUSH_PULL_STOPS = [
 ] as const;
 const aspectRatios = ['3:4', '6:7', '1:1', '16:9'] as const;
 type AspectRatio = (typeof aspectRatios)[number];
+type FilmShaderUniforms = [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
 
 function getAspectRatioValue(ratio: AspectRatio): number {
   'worklet';
@@ -384,7 +399,7 @@ export default function RealOrCamera() {
           let screenPaint: SkPaint | undefined;
 
           try {
-            const screenUniforms = [
+            const screenUniforms: FilmShaderUniforms = [
               width,
               height,
               filmProfile,
@@ -433,7 +448,7 @@ export default function RealOrCamera() {
                 }
                 const cropX = (outputWidth - cropWidth) / 2;
                 const cropY = (outputHeight - cropHeight) / 2;
-                const highResUniforms = [
+                const highResUniforms: FilmShaderUniforms = [
                   width,
                   height,
                   filmProfile,
