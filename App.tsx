@@ -37,13 +37,11 @@ import {
   ColorType,
   type SkPaint,
   type SkShader,
-  type SkImage,
   type SkSurface,
 } from '@shopify/react-native-skia';
 import { createSynchronizable, scheduleOnRN } from 'react-native-worklets';
 import { saveEncodedPhotoToLibrary } from './src/utils/saveEncodedPhotoToLibrary';
-import { getLatestPhotoUri } from './src/utils/getLatestPhotoUri';
-import Archive from './src/screens/Archive';
+import Archive, { type ArchivePhoto } from './src/screens/Archive';
 import {
   createFilmRuntimeEffect,
   type FilmProfile,
@@ -204,30 +202,6 @@ export default function RealOrCamera() {
     () => createSynchronizable(false, { fixedType: true }),
     [],
   );
-  const firstExposureImage = React.useMemo(
-    () => createSynchronizable<SkImage | null>(null),
-    [],
-  );
-  const firstExposureRequested = React.useMemo(
-    () => createSynchronizable(false, { fixedType: true }),
-    [],
-  );
-  const finalExposureRequested = React.useMemo(
-    () => createSynchronizable(false, { fixedType: true }),
-    [],
-  );
-  const clearFirstExposureRequested = React.useMemo(
-    () => createSynchronizable(false, { fixedType: true }),
-    [],
-  );
-  const firstExposureAvailable = React.useMemo(
-    () => createSynchronizable(false, { fixedType: true }),
-    [],
-  );
-  const liveMxMix = React.useMemo(
-    () => createSynchronizable(0),
-    [],
-  );
   const meterSampleRequested = React.useMemo(
     () => createSynchronizable(false, { fixedType: true }),
     [],
@@ -267,15 +241,13 @@ export default function RealOrCamera() {
   const activeZone = useSharedValue<string>('--');
   const viewfinderSize = useRef({ width: 0, height: 0 });
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('3:4');
-  const [mxMode, setMxMode] = useState(false);
-  const [isAwaitingSecondExposure, setIsAwaitingSecondExposure] =
-    useState(false);
   const [grainEnabled, setGrainEnabled] = useState(true);
   const [halationEnabled, setHalationEnabled] = useState(true);
   const [vignetteEnabled, setVignetteEnabled] = useState(true);
-  const [latestPhotoUri, setLatestPhotoUri] = useState<string | null>(null);
+  const [capturedFrames, setCapturedFrames] = useState<ArchivePhoto[]>([]);
   const [archiveVisible, setArchiveVisible] = useState(false);
   const [photosTaken, setPhotosTaken] = useState(0);
+  const latestPhotoUri = capturedFrames[0]?.uri ?? null;
   const statusTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const minExposure = device ? Math.max(-2, device.minExposureBias) : -2;
   const maxExposure = device ? Math.min(2, device.maxExposureBias) : 2;
@@ -298,15 +270,29 @@ export default function RealOrCamera() {
   const saveProcessedPhoto = React.useCallback(
     async (base64Data: string) => {
       try {
+        const developedTimestamp = new Date().toISOString();
+        const stock =
+          FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
+          String(filmProfile);
         const savedPhotoUri = await saveEncodedPhotoToLibrary(base64Data, {
-          stock:
-            FILM_STOCKS.find((profile) => profile.id === filmProfile)?.name ??
-            String(filmProfile),
+          stock,
           focalLength: lens,
           ev: boundedExposure,
-          developedTimestamp: new Date().toISOString(),
+          developedTimestamp,
         });
-        setLatestPhotoUri(savedPhotoUri);
+        const capturedFrame: ArchivePhoto = {
+          id: savedPhotoUri,
+          uri: savedPhotoUri,
+          createdAt: new Date(developedTimestamp),
+          stock,
+          focalLength: lens,
+          ev: boundedExposure,
+          developedTimestamp,
+        };
+        setCapturedFrames((previousFrames) => [
+          capturedFrame,
+          ...previousFrames,
+        ]);
         setPhotosTaken((count) => count + 1);
         isWoundRef.current = false;
         setIsWound(false);
@@ -328,7 +314,6 @@ export default function RealOrCamera() {
     setStatusMessage(null);
     setErrorMessage(message);
     setIsCapturing(false);
-    setIsAwaitingSecondExposure(false);
   }, []);
 
   const setMeterReadout = React.useCallback((readout: string) => {
@@ -388,47 +373,18 @@ export default function RealOrCamera() {
               scheduleOnRN(setMeterReadout, 'METER ERROR');
             }
           }
-          const clearPending = clearFirstExposureRequested.getBlocking();
-          let previousFrame = firstExposureImage.getBlocking();
-          if (clearPending) {
-            clearFirstExposureRequested.setBlocking(false);
-            firstExposureImage.setBlocking(null);
-            firstExposureAvailable.setBlocking(false);
-            previousFrame?.dispose();
-            previousFrame = null;
-          }
-          const firstCapture = firstExposureRequested.getBlocking();
-          const finalCapture = finalExposureRequested.getBlocking();
           const singleCapture = captureRequested.getBlocking();
-          const mxMix = previousFrame ? liveMxMix.getBlocking() : 0;
           const screenImageShader = frameTexture.makeShaderOptions(
             TileMode.Clamp,
             TileMode.Clamp,
             FilterMode.Linear,
             MipmapMode.None,
           );
-          const previousImageShader = previousFrame
-            ? previousFrame.makeShaderOptions(
-                TileMode.Clamp,
-                TileMode.Clamp,
-                FilterMode.Linear,
-                MipmapMode.None,
-              )
-            : frameTexture.makeShaderOptions(
-                TileMode.Clamp,
-                TileMode.Clamp,
-                FilterMode.Linear,
-                MipmapMode.None,
-              );
           let screenShader: SkShader | undefined;
           let screenPaint: SkPaint | undefined;
-          let firstFrameSurface: SkSurface | null = null;
 
           try {
             const screenUniforms = [
-              previousFrame?.width() ?? width,
-              previousFrame?.height() ?? height,
-              mxMix,
               width,
               height,
               filmProfile,
@@ -445,7 +401,7 @@ export default function RealOrCamera() {
             ];
             screenShader = filmEffect.makeShaderWithChildren(
               screenUniforms,
-              [screenImageShader, previousImageShader],
+              [screenImageShader],
             );
             screenPaint = Skia.Paint();
             screenPaint.setShader(screenShader);
@@ -454,35 +410,12 @@ export default function RealOrCamera() {
               screenPaint,
             );
 
-            if (firstCapture) {
-              firstExposureRequested.setBlocking(false);
-              firstFrameSurface = Skia.Surface.MakeOffscreen(
-                width,
-                height,
-              );
-              if (!firstFrameSurface) {
-                throw new Error('Unable to hold the first MX exposure.');
-              }
-              firstFrameSurface
-                .getCanvas()
-                .drawRect(Skia.XYWHRect(0, 0, width, height), screenPaint);
-              firstFrameSurface.flush();
-              const firstSnapshot = firstFrameSurface.makeImageSnapshot();
-              const oldFrame = firstExposureImage.getBlocking();
-              firstExposureImage.setBlocking(firstSnapshot);
-              firstExposureAvailable.setBlocking(true);
-              liveMxMix.setBlocking(0.35);
-              if (oldFrame && oldFrame !== firstSnapshot) oldFrame.dispose();
-            }
-
-            if (singleCapture || finalCapture) {
+            if (singleCapture) {
               captureRequested.setBlocking(false);
-              finalExposureRequested.setBlocking(false);
 
               let surface: SkSurface | null = null;
-              let snapshot: SkImage | undefined;
+              let snapshot: ReturnType<SkSurface['makeImageSnapshot']> | undefined;
               let highResImageShader: SkShader | undefined;
-              let highResPreviousImageShader: SkShader | undefined;
               let highResShader: SkShader | undefined;
               let offscreenPaint: SkPaint | undefined;
               try {
@@ -501,9 +434,6 @@ export default function RealOrCamera() {
                 const cropX = (outputWidth - cropWidth) / 2;
                 const cropY = (outputHeight - cropHeight) / 2;
                 const highResUniforms = [
-                  previousFrame?.width() ?? width,
-                  previousFrame?.height() ?? height,
-                  finalCapture && previousFrame ? 1 : mxMix,
                   width,
                   height,
                   filmProfile,
@@ -525,22 +455,9 @@ export default function RealOrCamera() {
                   FilterMode.Linear,
                   MipmapMode.None,
                 );
-                highResPreviousImageShader = previousFrame
-                  ? previousFrame.makeShaderOptions(
-                      TileMode.Clamp,
-                      TileMode.Clamp,
-                      FilterMode.Linear,
-                      MipmapMode.None,
-                    )
-                  : frameTexture.makeShaderOptions(
-                      TileMode.Clamp,
-                      TileMode.Clamp,
-                      FilterMode.Linear,
-                      MipmapMode.None,
-                    );
                 highResShader = filmEffect.makeShaderWithChildren(
                   highResUniforms,
-                  [highResImageShader, highResPreviousImageShader],
+                  [highResImageShader],
                 );
                 offscreenPaint = Skia.Paint();
                 offscreenPaint.setShader(highResShader);
@@ -597,15 +514,7 @@ export default function RealOrCamera() {
 
                 scheduleOnRN(saveProcessedPhoto, base64Data);
               } catch (error: unknown) {
-                firstExposureRequested.setBlocking(false);
                 captureRequested.setBlocking(false);
-                finalExposureRequested.setBlocking(false);
-                clearFirstExposureRequested.setBlocking(true);
-                firstExposureAvailable.setBlocking(false);
-                liveMxMix.setBlocking(0);
-                const heldFrame = firstExposureImage.getBlocking();
-                firstExposureImage.setBlocking(null);
-                heldFrame?.dispose();
                 scheduleOnRN(failCapture, `Capture failed: ${error}`);
               } finally {
                 snapshot?.dispose();
@@ -613,38 +522,19 @@ export default function RealOrCamera() {
                 offscreenPaint?.dispose();
                 highResShader?.dispose();
                 highResImageShader?.dispose();
-                highResPreviousImageShader?.dispose();
               }
             }
           } catch (error: unknown) {
-            firstExposureRequested.setBlocking(false);
             captureRequested.setBlocking(false);
-            finalExposureRequested.setBlocking(false);
-            clearFirstExposureRequested.setBlocking(true);
-            firstExposureAvailable.setBlocking(false);
-            liveMxMix.setBlocking(0);
-            const heldFrame = firstExposureImage.getBlocking();
-            firstExposureImage.setBlocking(null);
-            heldFrame?.dispose();
             scheduleOnRN(failCapture, `Capture failed: ${error}`);
           } finally {
             screenPaint?.dispose();
             screenShader?.dispose();
             screenImageShader.dispose();
-            previousImageShader.dispose();
-            firstFrameSurface?.dispose();
           }
         });
       } catch (error: unknown) {
-        firstExposureRequested.setBlocking(false);
         captureRequested.setBlocking(false);
-        finalExposureRequested.setBlocking(false);
-        clearFirstExposureRequested.setBlocking(true);
-        firstExposureAvailable.setBlocking(false);
-        liveMxMix.setBlocking(0);
-        const heldFrame = firstExposureImage.getBlocking();
-        firstExposureImage.setBlocking(null);
-        heldFrame?.dispose();
         scheduleOnRN(failCapture, `Capture failed: ${error}`);
       } finally {
         frame.dispose();
@@ -652,12 +542,6 @@ export default function RealOrCamera() {
     },
     [
       captureRequested,
-      firstExposureImage,
-      firstExposureRequested,
-      finalExposureRequested,
-      clearFirstExposureRequested,
-      firstExposureAvailable,
-      liveMxMix,
       aspectRatio,
       failCapture,
       filmEffect,
@@ -679,15 +563,6 @@ export default function RealOrCamera() {
 
   useEffect(
     () => () => {
-      const heldFrame = firstExposureImage.getBlocking();
-      firstExposureImage.setBlocking(null);
-      heldFrame?.dispose();
-    },
-    [firstExposureImage],
-  );
-
-  useEffect(
-    () => () => {
       if (statusTimeout.current) clearTimeout(statusTimeout.current);
     },
     [],
@@ -704,29 +579,6 @@ export default function RealOrCamera() {
       });
     }
   }, [canRequestPermission, hasPermission, requestPermission]);
-
-  useEffect(() => {
-    if (!hasPermission) return undefined;
-
-    let isMounted = true;
-    void getLatestPhotoUri()
-      .then((uri) => {
-        if (isMounted && uri) setLatestPhotoUri(uri);
-      })
-      .catch((error: unknown) => {
-        if (isMounted) {
-          setErrorMessage(
-            error instanceof Error
-              ? error.message
-              : 'Unable to load the latest camera-roll photo.',
-          );
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [hasPermission]);
 
   const takePhoto = () => {
     if (!device || !hasPermission || isCapturing || !isWoundRef.current) return;
@@ -790,63 +642,14 @@ export default function RealOrCamera() {
     [advanceFilm, leverProgress],
   );
 
-  const resetMxExposure = () => {
-    clearFirstExposureRequested.setBlocking(true);
-    firstExposureRequested.setBlocking(false);
-    finalExposureRequested.setBlocking(false);
-    captureRequested.setBlocking(false);
-    firstExposureAvailable.setBlocking(false);
-    liveMxMix.setBlocking(0);
-    setIsAwaitingSecondExposure(false);
-  };
-
   const handleShutter = () => {
     if (!device || !hasPermission || isCapturing || !isWoundRef.current) return;
-
-    if (mxMode) {
-      if (!isAwaitingSecondExposure) {
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
-          (error: unknown) => {
-            console.warn('Unable to play MX shutter haptic feedback.', error);
-          },
-        );
-        clearFirstExposureRequested.setBlocking(true);
-        firstExposureAvailable.setBlocking(false);
-        liveMxMix.setBlocking(0);
-        firstExposureRequested.setBlocking(true);
-        setIsAwaitingSecondExposure(true);
-        setErrorMessage(null);
-        setStatusMessage('FIRST EXPOSURE HELD · REFRAME AND PRESS AGAIN');
-        return;
-      }
-
-      if (!firstExposureAvailable.getBlocking()) {
-        setStatusMessage('HOLD THE FIRST EXPOSURE · READYING MEMORY');
-        return;
-      }
-
-      resetMxExposure();
-      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
-        (error: unknown) => {
-          console.warn('Unable to play final MX shutter haptic feedback.', error);
-        },
-      );
-      if (statusTimeout.current) clearTimeout(statusTimeout.current);
-      setIsCapturing(true);
-      setIsAwaitingSecondExposure(false);
-      setErrorMessage(null);
-      setStatusMessage('BLENDING DOUBLE EXPOSURE…');
-      liveMxMix.setBlocking(1);
-      finalExposureRequested.setBlocking(true);
-      return;
-    }
 
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
       (error: unknown) => {
         console.warn('Unable to play shutter haptic feedback.', error);
       },
     );
-    liveMxMix.setBlocking(0);
     void takePhoto();
   };
 
@@ -855,28 +658,6 @@ export default function RealOrCamera() {
       console.warn('Unable to play aspect-ratio selection haptic feedback.', error);
     });
     setAspectRatio(ratio);
-  };
-
-  const handleCancelMx = () => {
-    void Haptics.notificationAsync(
-      Haptics.NotificationFeedbackType.Warning,
-    ).catch((error: unknown) => {
-      console.warn('Unable to play MX cancellation haptic feedback.', error);
-    });
-    resetMxExposure();
-    setMxMode(false);
-    setStatusMessage(null);
-  };
-
-  const toggleMxMode = () => {
-    if (mxMode || isAwaitingSecondExposure) {
-      handleCancelMx();
-      return;
-    }
-    void Haptics.selectionAsync().catch((error: unknown) => {
-      console.warn('Unable to play MX mode haptic feedback.', error);
-    });
-    setMxMode(true);
   };
 
   const updateExposureFromDrag = (pageY: number) => {
@@ -1406,26 +1187,6 @@ export default function RealOrCamera() {
               );
             })}
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={
-              isAwaitingSecondExposure
-                ? 'Cancel double exposure'
-                : `Toggle MX double exposure${mxMode ? ' on' : ' off'}`
-            }
-            accessibilityState={{ checked: mxMode }}
-            disabled={isCapturing}
-            onPress={toggleMxMode}
-            style={({ pressed }) => [
-              styles.mxButton,
-              mxMode && styles.mxButtonActive,
-              pressed && styles.controlButtonPressed,
-            ]}
-          >
-            <Text style={[styles.mxButtonText, mxMode && styles.mxButtonTextActive]}>
-              {isAwaitingSecondExposure ? 'MX · 2ND' : `MX ${mxMode ? 'ON' : 'OFF'}`}
-            </Text>
-          </Pressable>
         </View>
         <View style={styles.effectOptions}>
           <View style={styles.effectSwitch}>
@@ -1625,6 +1386,7 @@ export default function RealOrCamera() {
         onRequestClose={() => setArchiveVisible(false)}
       >
         <Archive
+          capturedFrames={capturedFrames}
           onClose={() => setArchiveVisible(false)}
         />
       </Modal>
@@ -1636,8 +1398,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#121212',
-    paddingTop: 48,
-    paddingBottom: 8,     // Reduced so the bottom doesn't waste space
+    paddingTop: 44,
+    paddingBottom: 4,
     paddingHorizontal: 8,
   },
   messageContainer: {
@@ -1761,7 +1523,7 @@ const styles = StyleSheet.create({
   viewfinderContainer: {
     width: '100%',
     aspectRatio: 0.75,
-    maxHeight: '48%',     // Slightly reduced height so controls get more breathing room
+    maxHeight: '46%',
     alignSelf: 'center',
     borderWidth: 2,
     borderColor: '#2c2c2e',
@@ -2069,38 +1831,6 @@ const styles = StyleSheet.create({
   },
   ratioButtonTextActive: {
     color: '#121212',
-  },
-  mxButton: {
-    minWidth: 48,
-    minHeight: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 6,
-    borderWidth: 1,
-    borderTopWidth: 1,
-    borderBottomWidth: 2,
-    borderTopColor: '#535357',
-    borderBottomColor: '#080808',
-    borderLeftColor: '#414145',
-    borderRightColor: '#080808',
-    borderRadius: 4,
-    backgroundColor: '#252527',
-  },
-  mxButtonActive: {
-    borderTopColor: '#ffd27a',
-    borderBottomColor: '#6e3d00',
-    borderLeftColor: '#ff9500',
-    borderRightColor: '#6e3d00',
-    backgroundColor: '#3a2b15',
-  },
-  mxButtonText: {
-    color: '#c7c7cc',
-    fontSize: 7,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  mxButtonTextActive: {
-    color: '#ffbf58',
   },
   sectionLabel: {
     marginBottom: 4,
@@ -2431,7 +2161,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
   },
   shutterDeck: {
-    height: 48,           // Fixed compact height for the bottom deck
+    height: 46,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-evenly',
@@ -2446,9 +2176,9 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
   },
   shutterOuter: {
-    width: 44,            // Compact shutter size so it fits easily above home indicator
-    height: 44,
-    borderRadius: 22,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#2c2c2e',
