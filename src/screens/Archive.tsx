@@ -1,18 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
-import Animated, {
-  interpolateColor,
-  useDerivedValue,
-  useAnimatedStyle,
-  withRepeat,
-  withTiming,
-} from 'react-native-reanimated';
-import {
-  Asset,
-  AssetField,
-  MediaType,
-  Query,
-  requestPermissionsAsync,
-} from 'expo-media-library';
+import { useCallback, useState } from 'react';
 import * as Haptics from 'expo-haptics';
 import {
   FlatList,
@@ -24,9 +10,8 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
-import { readDevelopedPhotoMetadata } from '../utils/photoMetadata';
 
-type ArchivePhoto = {
+export type ArchivePhoto = {
   id: string;
   uri: string;
   createdAt: Date | null;
@@ -37,59 +22,9 @@ type ArchivePhoto = {
 };
 
 type ArchiveProps = {
+  capturedFrames: ArchivePhoto[];
   onClose: () => void;
 };
-
-const PHOTO_LIMIT = 300;
-
-async function loadArchivePhotos(): Promise<ArchivePhoto[] | null> {
-  const permission = await requestPermissionsAsync(false, ['photo']);
-  if (!permission.granted) {
-    return null;
-  }
-
-  const assets: Asset[] = await new Query()
-    .eq(AssetField.MEDIA_TYPE, MediaType.IMAGE)
-    .orderBy({ key: AssetField.CREATION_TIME, ascending: false })
-    .limit(PHOTO_LIMIT)
-    .exe();
-
-  const [metadataById, loadedAssets] = await Promise.all([
-    readDevelopedPhotoMetadata(),
-    Promise.all(
-      assets.map(async (asset) => {
-        const [uri, creationTime] = await Promise.all([
-          asset.getUri(),
-          asset.getCreationTime(),
-        ]);
-        return {
-          id: asset.id,
-          uri,
-          createdAt:
-            creationTime === null ? null : new Date(creationTime * 1000),
-          creationTime,
-        };
-      }),
-    ),
-  ]);
-
-  return loadedAssets.map((asset) => {
-    const metadata = metadataById[asset.id];
-    return {
-      id: asset.id,
-      uri: asset.uri,
-      createdAt: asset.createdAt,
-      stock: metadata?.stock ?? 'UNRECORDED',
-      focalLength: metadata?.focalLength ?? 'UNRECORDED',
-      ev: metadata?.ev ?? null,
-      developedTimestamp:
-        metadata?.developedTimestamp ??
-        (asset.creationTime === null
-          ? null
-          : new Date(asset.creationTime * 1000).toISOString()),
-    };
-  });
-}
 
 function formatExposure(exposure: number | null): string {
   if (exposure === null) return 'UNRECORDED';
@@ -117,51 +52,11 @@ function formatImprintDate(date: Date | null): string {
 }
 
 export default function Archive({
+  capturedFrames,
   onClose,
 }: ArchiveProps) {
   const { width } = useWindowDimensions();
-  const [photos, setPhotos] = useState<ArchivePhoto[]>([]);
   const [selectedPhoto, setSelectedPhoto] = useState<ArchivePhoto | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [permissionDenied, setPermissionDenied] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const safelightProgress = useDerivedValue(() =>
-    isLoading
-      ? withRepeat(withTiming(1, { duration: 1400 }), -1, true)
-      : withTiming(0, { duration: 300 }),
-  );
-  const safelightStyle = useAnimatedStyle(() => ({
-    backgroundColor: interpolateColor(
-      safelightProgress.value,
-      [0, 1],
-      ['#050505', '#3a0505'],
-    ),
-  }));
-  const refreshPhotos = useCallback(async () => {
-    setIsLoading(true);
-    setPermissionDenied(false);
-    setLoadError(null);
-    try {
-      const loadedPhotos = await loadArchivePhotos();
-      if (loadedPhotos === null) {
-        setPermissionDenied(true);
-      } else {
-        setPhotos(loadedPhotos);
-      }
-    } catch (error) {
-      console.error('Unable to load photos for the archive.', error);
-      setLoadError('The photo archive could not be loaded.');
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    const loadTimeout = setTimeout(() => {
-      void refreshPhotos();
-    }, 0);
-    return () => clearTimeout(loadTimeout);
-  }, [refreshPhotos]);
 
   const openPhoto = useCallback((photo: ArchivePhoto) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
@@ -216,7 +111,7 @@ export default function Archive({
   );
 
   return (
-    <Animated.View style={[styles.container, safelightStyle]}>
+    <View style={styles.container}>
       <StatusBar barStyle="light-content" />
       <View style={styles.header}>
         <View>
@@ -236,48 +131,14 @@ export default function Archive({
         </Pressable>
       </View>
 
-      <View
-        style={[
-          styles.contactSheet,
-          isLoading && styles.contactSheetLoading,
-        ]}
-      >
-        {isLoading ? (
-          <View style={styles.messageState}>
-            <View style={styles.safelightIndicator} />
-            <Text style={styles.stateText}>DEVELOPING CONTACT SHEET</Text>
-          </View>
-        ) : permissionDenied ? (
-          <View style={styles.messageState}>
-            <Text style={styles.stateText}>
-              PHOTO LIBRARY ACCESS IS REQUIRED TO VIEW THE ARCHIVE
-            </Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void refreshPhotos()}
-              style={styles.retryButton}
-            >
-              <Text style={styles.retryButtonText}>TRY AGAIN</Text>
-            </Pressable>
-          </View>
-        ) : loadError ? (
-          <View style={styles.messageState}>
-            <Text style={styles.stateText}>{loadError}</Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void refreshPhotos()}
-              style={styles.retryButton}
-            >
-              <Text style={styles.retryButtonText}>RETRY</Text>
-            </Pressable>
-          </View>
-        ) : photos.length === 0 ? (
+      <View style={styles.contactSheet}>
+        {capturedFrames.length === 0 ? (
           <View style={styles.messageState}>
             <Text style={styles.stateText}>NO DEVELOPED FRAMES YET</Text>
           </View>
         ) : (
           <FlatList
-            data={photos}
+            data={capturedFrames}
             keyExtractor={(item) => item.id}
             renderItem={renderPhoto}
             numColumns={3}
@@ -289,7 +150,7 @@ export default function Archive({
         )}
       </View>
       <Text style={styles.footerLabel}>
-        {String(photos.length).padStart(2, '0')} FRAMES · CONTACT SHEET
+        {String(capturedFrames.length).padStart(2, '0')} FRAMES · CONTACT SHEET
       </Text>
 
       {selectedPhoto ? (
@@ -345,7 +206,7 @@ export default function Archive({
           </View>
         </View>
       ) : null}
-    </Animated.View>
+    </View>
   );
 }
 
@@ -414,9 +275,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#151512',
     padding: 6,
   },
-  contactSheetLoading: {
-    backgroundColor: 'transparent',
-  },
   contactSheetContent: {
     paddingBottom: 4,
   },
@@ -470,16 +328,6 @@ const styles = StyleSheet.create({
     fontFamily: 'Courier',
     textAlign: 'right',
   },
-  safelightIndicator: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#ff3b30',
-    shadowColor: '#ff3b30',
-    shadowOpacity: 0.5,
-    shadowRadius: 8,
-    elevation: 4,
-  },
   messageState: {
     flex: 1,
     justifyContent: 'center',
@@ -494,21 +342,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     lineHeight: 18,
     fontFamily: 'Menlo',
-  },
-  retryButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    backgroundColor: '#292927',
-    borderColor: '#555550',
-    borderTopWidth: 1,
-    borderBottomWidth: 3,
-    borderRadius: 4,
-  },
-  retryButtonText: {
-    color: '#ff9500',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.5,
   },
   footerLabel: {
     color: '#666663',

@@ -78,21 +78,144 @@ const PUSH_PULL_STOPS = [
 ] as const;
 const aspectRatios = ['3:4', '6:7', '1:1', '16:9'] as const;
 type AspectRatio = (typeof aspectRatios)[number];
-type FilmShaderUniforms = [
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-];
+type FilmShaderUniformValues = {
+  width: number;
+  height: number;
+  filmProfile: number;
+  grain: number;
+  halation: number;
+  seed: number;
+  exposure: number;
+  vignette: number;
+  manualFocus: number;
+  focusDistance: number;
+  meterX: number;
+  meterY: number;
+  pushPull: number;
+};
+
+const FILM_SHADER_UNIFORM_COUNT = 11;
+const FILM_SHADER_VALUE_FLOAT_COUNT = 13;
+const FILM_SHADER_RUNTIME_FLOAT_COUNT = 16;
+
+function buildShaderUniforms(
+  effect: ReturnType<typeof createFilmRuntimeEffect>,
+  values: FilmShaderUniformValues,
+): number[] {
+  'worklet';
+
+  const uniformCount = effect.getUniformCount();
+  const expectedFloatCount = effect.getUniformFloatCount();
+  if (
+    uniformCount !== FILM_SHADER_UNIFORM_COUNT ||
+    expectedFloatCount !== FILM_SHADER_RUNTIME_FLOAT_COUNT
+  ) {
+    throw new Error(
+      `Film shader layout changed (uniforms: ${uniformCount}, floats: ${expectedFloatCount}); update buildShaderUniforms to match the SkSL declarations.`,
+    );
+  }
+
+  // Fill by Skia's slots so any reserved layout padding stays zero.
+  const uniforms = new Array<number>(expectedFloatCount).fill(0);
+  const seenUniforms = new Array<boolean>(uniformCount).fill(false);
+  let assignedFloatCount = 0;
+
+  for (let index = 0; index < uniformCount; index += 1) {
+    const name = effect.getUniformName(index);
+    const uniform = effect.getUniform(index);
+    let uniformValues: number[];
+    let schemaIndex: number;
+
+    switch (name) {
+      case 'u_resolution':
+        uniformValues = [values.width, values.height];
+        schemaIndex = 0;
+        break;
+      case 'u_profile':
+        uniformValues = [values.filmProfile];
+        schemaIndex = 1;
+        break;
+      case 'u_grain':
+        uniformValues = [values.grain];
+        schemaIndex = 2;
+        break;
+      case 'u_halation':
+        uniformValues = [values.halation];
+        schemaIndex = 3;
+        break;
+      case 'u_seed':
+        uniformValues = [values.seed];
+        schemaIndex = 4;
+        break;
+      case 'u_exposure':
+        uniformValues = [values.exposure];
+        schemaIndex = 5;
+        break;
+      case 'u_vignette':
+        uniformValues = [values.vignette];
+        schemaIndex = 6;
+        break;
+      case 'u_manualFocus':
+        uniformValues = [values.manualFocus];
+        schemaIndex = 7;
+        break;
+      case 'u_focusDistance':
+        uniformValues = [values.focusDistance];
+        schemaIndex = 8;
+        break;
+      case 'u_meterPoint':
+        uniformValues = [values.meterX, values.meterY];
+        schemaIndex = 9;
+        break;
+      case 'u_pushPull':
+        uniformValues = [values.pushPull];
+        schemaIndex = 10;
+        break;
+      default:
+        throw new Error(`Film shader uniform "${name}" has no value mapping.`);
+    }
+
+    if (seenUniforms[schemaIndex]) {
+      throw new Error(`Film shader uniform "${name}" is declared more than once.`);
+    }
+    seenUniforms[schemaIndex] = true;
+
+    if (uniform.columns * uniform.rows !== uniformValues.length) {
+      throw new Error(
+        `Film shader uniform "${name}" expects ${uniform.columns * uniform.rows} values; received ${uniformValues.length}.`,
+      );
+    }
+    if (
+      uniform.slot < 0 ||
+      uniform.slot + uniformValues.length > uniforms.length
+    ) {
+      throw new Error(`Film shader uniform "${name}" has an invalid float slot.`);
+    }
+
+    for (let valueIndex = 0; valueIndex < uniformValues.length; valueIndex += 1) {
+      uniforms[uniform.slot + valueIndex] = uniformValues[valueIndex];
+    }
+    assignedFloatCount += uniformValues.length;
+  }
+
+  for (let index = 0; index < seenUniforms.length; index += 1) {
+    if (!seenUniforms[index]) {
+      throw new Error(`Film shader uniform mapping ${index} was not applied.`);
+    }
+  }
+  if (assignedFloatCount !== FILM_SHADER_VALUE_FLOAT_COUNT) {
+    throw new Error(
+      `Film shader values contain ${assignedFloatCount} floats; expected ${FILM_SHADER_VALUE_FLOAT_COUNT}.`,
+    );
+  }
+  if (uniforms.length !== expectedFloatCount) {
+    throw new Error(
+      `Film shader uniforms contain ${uniforms.length} floats; expected ${expectedFloatCount}.`,
+    );
+  }
+
+  return uniforms;
+}
 
 function getAspectRatioValue(ratio: AspectRatio): number {
   'worklet';
@@ -399,21 +522,21 @@ export default function RealOrCamera() {
           let screenPaint: SkPaint | undefined;
 
           try {
-            const screenUniforms: FilmShaderUniforms = [
+            const screenUniforms = buildShaderUniforms(filmEffect, {
               width,
               height,
               filmProfile,
-              grainEnabled ? 0.35 : 0,
-              halationEnabled ? 0.65 : 0,
-              dynamicSeed,
-              boundedExposure,
-              vignetteEnabled ? 0.9 : 0,
-              manualFocusActive ? 1.0 : 0.0,
+              grain: grainEnabled ? 0.35 : 0,
+              halation: halationEnabled ? 0.65 : 0,
+              seed: dynamicSeed,
+              exposure: boundedExposure,
+              vignette: vignetteEnabled ? 0.9 : 0,
+              manualFocus: manualFocusActive ? 1.0 : 0.0,
               focusDistance,
-              meterPoint ? meterPoint.x * width : 0,
-              meterPoint ? meterPoint.y * height : 0,
+              meterX: meterPoint ? meterPoint.x * width : 0,
+              meterY: meterPoint ? meterPoint.y * height : 0,
               pushPull,
-            ];
+            });
             screenShader = filmEffect.makeShaderWithChildren(
               screenUniforms,
               [screenImageShader],
@@ -448,21 +571,21 @@ export default function RealOrCamera() {
                 }
                 const cropX = (outputWidth - cropWidth) / 2;
                 const cropY = (outputHeight - cropHeight) / 2;
-                const highResUniforms: FilmShaderUniforms = [
+                const highResUniforms = buildShaderUniforms(filmEffect, {
                   width,
                   height,
                   filmProfile,
-                  grainEnabled ? 0.35 : 0,
-                  halationEnabled ? 0.65 : 0,
-                  dynamicSeed,
-                  boundedExposure,
-                  vignetteEnabled ? 0.9 : 0,
-                  manualFocusActive ? 1.0 : 0.0,
+                  grain: grainEnabled ? 0.35 : 0,
+                  halation: halationEnabled ? 0.65 : 0,
+                  seed: dynamicSeed,
+                  exposure: boundedExposure,
+                  vignette: vignetteEnabled ? 0.9 : 0,
+                  manualFocus: manualFocusActive ? 1.0 : 0.0,
                   focusDistance,
-                  meterPoint ? meterPoint.x * width : 0,
-                  meterPoint ? meterPoint.y * height : 0,
+                  meterX: meterPoint ? meterPoint.x * width : 0,
+                  meterY: meterPoint ? meterPoint.y * height : 0,
                   pushPull,
-                ];
+                });
 
                 highResImageShader = frameTexture.makeShaderOptions(
                   TileMode.Clamp,

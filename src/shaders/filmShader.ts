@@ -13,9 +13,6 @@ export interface FilmShaderSettings {
 
 export const filmShaderSource = `
 uniform shader image;
-uniform shader u_previousFrame;
-uniform float2 u_prevResolution;
-uniform float u_mxMix;
 uniform float2 u_resolution;
 uniform float u_profile;
 uniform float u_grain;
@@ -68,12 +65,6 @@ half4 main(float2 xy) {
   float3 n3 = toLinear(image.eval(xy + float2(0.0, 0.8)).rgb);
   float3 n4 = toLinear(image.eval(xy - float2(0.0, 0.8)).rgb);
   float3 linearRGB = center * 0.55 + (n1 + n2 + n3 + n4) * 0.1125;
-
-  if (u_mxMix > 0.01) {
-    float2 previousCoord = (xy / u_resolution) * u_prevResolution;
-    float3 previousSample = u_previousFrame.eval(previousCoord).rgb;
-    linearRGB += toLinear(previousSample) * u_mxMix;
-  }
 
   float radius = max(2.0, min(u_resolution.x, u_resolution.y) * 0.0045);
   float diagonalRadius = radius * 0.70710678;
