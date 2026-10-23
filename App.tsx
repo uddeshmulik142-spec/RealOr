@@ -96,7 +96,7 @@ type FilmShaderUniformValues = {
 
 const FILM_SHADER_UNIFORM_COUNT = 11;
 const FILM_SHADER_VALUE_FLOAT_COUNT = 13;
-const FILM_SHADER_RUNTIME_FLOAT_COUNT = 16;
+const FILM_SHADER_RUNTIME_FLOAT_COUNT = 13;
 
 function buildShaderUniforms(
   effect: ReturnType<typeof createFilmRuntimeEffect>,
