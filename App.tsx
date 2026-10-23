@@ -320,6 +320,7 @@ function RealOrCameraScreen() {
   const [isWound, setIsWound] = useState(true);
   const isWoundRef = useRef(true);
   const leverProgress = useSharedValue(0);
+  const leverStopTriggered = useRef(false);
   const [leverTrackWidth, setLeverTrackWidth] = useState(0);
   const leverTrackWidthRef = useRef(0);
   const shutterAnimatedStyle = useAnimatedStyle(() => ({
@@ -464,7 +465,7 @@ function RealOrCameraScreen() {
     if (readout === 'METER ERROR') {
       setStatusMessage('SPOT METER SAMPLE UNAVAILABLE');
     }
-  }, []);
+  }, [setActiveZoneLabel, setStatusMessage]);
 
   const renderFilmFrame = React.useCallback<SkiaCameraProps['onFrame']>(
     (frame, render) => {
@@ -737,8 +738,9 @@ function RealOrCameraScreen() {
     if (isWoundRef.current) return;
     isWoundRef.current = true;
     setIsWound(true);
+    // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from event callbacks.
     leverProgress.value = withSpring(0, { damping: 14, stiffness: 180 });
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch(
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(
       (error: unknown) => {
         console.warn('Unable to play film-advance ratchet feedback.', error);
       },
@@ -747,6 +749,7 @@ function RealOrCameraScreen() {
 
   const filmAdvancePanResponder = React.useMemo(
     () =>
+      // eslint-disable-next-line react-hooks/refs -- PanResponder evaluates these ref reads only when events fire.
       PanResponder.create({
         onStartShouldSetPanResponder: () => false,
         onMoveShouldSetPanResponder: (_, gestureState) =>
@@ -754,20 +757,31 @@ function RealOrCameraScreen() {
           gestureState.dx > 8 &&
           Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
         onPanResponderGrant: () => {
+          // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from event callbacks.
           leverProgress.value = 0;
+          leverStopTriggered.current = false;
         },
         onPanResponderMove: (_, gestureState) => {
           const availableTravel = Math.max(1, leverTrackWidthRef.current - 36);
-          leverProgress.value = Math.min(
+          const progress = Math.min(
             1,
             Math.max(0, gestureState.dx / availableTravel),
           );
+          // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from event callbacks.
+          leverProgress.value = progress;
+          if (progress >= 0.5 && !leverStopTriggered.current) {
+            leverStopTriggered.current = true;
+            void Haptics.selectionAsync().catch((error: unknown) => {
+              console.warn('Unable to play film-advance detent feedback.', error);
+            });
+          }
         },
         onPanResponderRelease: (_, gestureState) => {
           const availableTravel = Math.max(1, leverTrackWidthRef.current - 36);
           if (gestureState.dx / availableTravel >= 0.9) {
             advanceFilm();
           } else {
+            // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from event callbacks.
             leverProgress.value = withSpring(0, {
               damping: 14,
               stiffness: 180,
@@ -775,6 +789,7 @@ function RealOrCameraScreen() {
           }
         },
         onPanResponderTerminate: () => {
+          // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from event callbacks.
           leverProgress.value = withSpring(0, {
             damping: 14,
             stiffness: 180,
@@ -827,6 +842,9 @@ function RealOrCameraScreen() {
     const newEV = Math.round(
       Math.min(maxExposure, Math.max(minExposure, value)) * 10,
     ) / 10;
+    void Haptics.selectionAsync().catch((error: unknown) => {
+      console.warn('Unable to play exposure selection haptic feedback.', error);
+    });
     lastHapticEV.current = newEV;
     setExposure(newEV);
   };
@@ -844,6 +862,7 @@ function RealOrCameraScreen() {
   }, []);
   const focusPanResponder = React.useMemo(
     () =>
+      // eslint-disable-next-line react-hooks/refs -- PanResponder evaluates these ref reads only when events fire.
       PanResponder.create({
         onStartShouldSetPanResponder: () => manualFocusActive,
         onMoveShouldSetPanResponder: (_, gestureState) =>
@@ -869,16 +888,22 @@ function RealOrCameraScreen() {
     setManualFocusActive((active) => !active);
   };
   const selectLens = (lensOption: typeof lens) => {
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Rigid).catch((error: unknown) => {
-      console.warn('Unable to play lens selection haptic feedback.', error);
-    });
+    if (lensOption !== lens) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch((error: unknown) => {
+        console.warn('Unable to play lens selection haptic feedback.', error);
+      });
+    }
     setLens(lensOption);
     setZoom(zoomLevels[lensOption]);
   };
   const selectFilmProfile = (profile: FilmProfile) => {
-    void Haptics.selectionAsync().catch((error: unknown) => {
-      console.warn('Unable to play film selection haptic feedback.', error);
-    });
+    if (profile !== filmProfile) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+        (error: unknown) => {
+          console.warn('Unable to play film selection haptic feedback.', error);
+        },
+      );
+    }
     setFilmProfile(profile);
   };
   const selectPushPull = (value: number) => {
@@ -1057,6 +1082,7 @@ function RealOrCameraScreen() {
               );
               setMeterPoint({ x, y });
               setActiveZoneLabel('METERING…');
+              // eslint-disable-next-line react-hooks/immutability -- Worklet shared values are updated from this press callback.
               activeZone.value = 'METERING…';
               meterSampleRequested.setBlocking(true);
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
@@ -1504,12 +1530,14 @@ function RealOrCameraScreen() {
                   console.warn('Unable to play half-press haptic feedback.', error);
                 },
               );
+              // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from press callbacks.
               shutterScale.value = withSpring(0.84, {
                 damping: 14,
                 stiffness: 320,
               });
             }}
             onPressOut={() => {
+              // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from press callbacks.
               shutterScale.value = withSpring(1, {
                 damping: 10,
                 stiffness: 260,
