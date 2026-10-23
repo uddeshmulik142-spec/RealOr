@@ -15,6 +15,7 @@
     "react-native-nitro-image": "0.15.2",
     "react-native-nitro-modules": "0.37.0",
     "react-native-reanimated": "4.7.1",
+    "react-native-safe-area-context": "~5.10.1",
     "react-native-vision-camera": "^5.2.3",
     "react-native-vision-camera-skia": "^5.2.3",
     "react-native-vision-camera-worklets": "^5.2.3",

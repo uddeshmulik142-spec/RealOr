@@ -7,14 +7,15 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "bundleIdentifier": "online.latchos.realor",
+      "buildNumber": "1",
+      "supportsTablet": false,
       "infoPlist": {
-        "NSCameraUsageDescription": "RealOr uses the camera to capture photos for analysis.",
-        "NSPhotoLibraryAddUsageDescription": "RealOr saves developed photos to your camera roll.",
-        "NSPhotoLibraryUsageDescription": "RealOr needs photo library access to save developed photos.",
+        "NSCameraUsageDescription": "RealOr requires camera access to capture film-simulated 35mm photographs.",
+        "NSPhotoLibraryUsageDescription": "RealOr requires photo library access to save developed frames to your darkroom.",
+        "NSPhotoLibraryAddUsageDescription": "RealOr needs permission to save developed photographs to your camera roll.",
         "ITSAppUsesNonExemptEncryption": false
-      },
-      "bundleIdentifier": "com.uddeshmulik.RealOr"
+      }
     },
     "android": {
       "permissions": [

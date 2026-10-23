@@ -19,6 +19,10 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
+import {
   useCameraDevice,
   useCameraPermission,
   type CameraDevice,
@@ -293,10 +297,11 @@ function clampZoom(zoom: number, device: CameraDevice): number {
   return Math.min(device.maxZoom, Math.max(device.minZoom, zoom));
 }
 
-export default function RealOrCamera() {
+function RealOrCameraScreen() {
+  const insets = useSafeAreaInsets();
   const [lens, setLens] = useState<'0.5x' | '1x' | '2x' | '5x'>('1x');
   const multiLensDevice = useCameraDevice('back', {
-    physicalDevices: ['ultra-wide-angle', 'wide-angle', 'telephoto'],
+    physicalDevices: ['ultra-wide-angle', 'wide-angle'],
   });
   const defaultBackDevice = useCameraDevice('back');
   const device = multiLensDevice ?? defaultBackDevice;
@@ -928,7 +933,13 @@ export default function RealOrCamera() {
 
   return (
     <View
-      style={styles.container}
+      style={[
+        styles.container,
+        {
+          paddingTop: Math.max(insets.top, 20),
+          paddingBottom: Math.max(insets.bottom, 12),
+        },
+      ]}
       onTouchStart={(event) => {
         exposureTouchStart.current = {
           x: event.nativeEvent.pageX,
@@ -1532,12 +1543,18 @@ export default function RealOrCamera() {
   );
 }
 
+export default function RealOrCamera() {
+  return (
+    <SafeAreaProvider>
+      <RealOrCameraScreen />
+    </SafeAreaProvider>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#121212',
-    paddingTop: 44,
-    paddingBottom: 4,
     paddingHorizontal: 8,
   },
   messageContainer: {
@@ -1659,6 +1676,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#ff9500',
   },
   viewfinderContainer: {
+    flexShrink: 1,
+    minHeight: 0,
     width: '100%',
     aspectRatio: 0.75,
     maxHeight: '46%',
