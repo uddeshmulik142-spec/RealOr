@@ -19,6 +19,11 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import {
+  setAudioModeAsync,
+  useAudioPlayer,
+  type AudioPlayer,
+} from 'expo-audio';
+import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
@@ -101,6 +106,15 @@ type FilmShaderUniformValues = {
 const FILM_SHADER_UNIFORM_COUNT = 11;
 const FILM_SHADER_VALUE_FLOAT_COUNT = 13;
 const FILM_SHADER_RUNTIME_FLOAT_COUNT = 13;
+
+function playCameraSound(player: AudioPlayer, soundName: string): void {
+  void player
+    .seekTo(0)
+    .then(() => player.play())
+    .catch((error: unknown) => {
+      console.warn(`Unable to play ${soundName} sound.`, error);
+    });
+}
 
 function buildShaderUniforms(
   effect: ReturnType<typeof createFilmRuntimeEffect>,
@@ -299,6 +313,12 @@ function clampZoom(zoom: number, device: CameraDevice): number {
 
 function RealOrCameraScreen() {
   const insets = useSafeAreaInsets();
+  const shutterSound = useAudioPlayer(
+    require('./assets/sounds/shutter-clack.wav'),
+  );
+  const filmAdvanceSound = useAudioPlayer(
+    require('./assets/sounds/film-advance-ratchet.wav'),
+  );
   const [lens, setLens] = useState<'0.5x' | '1x' | '2x' | '5x'>('1x');
   const multiLensDevice = useCameraDevice('back', {
     physicalDevices: ['ultra-wide-angle', 'wide-angle'],
@@ -401,6 +421,16 @@ function RealOrCameraScreen() {
   );
   const activeFilm = FILM_STOCKS.find((profile) => profile.id === filmProfile);
   useEffect(() => {
+    void setAudioModeAsync({
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+      interruptionMode: 'duckOthers',
+    }).catch((error: unknown) => {
+      console.warn('Unable to configure camera sound playback.', error);
+    });
+  }, []);
+
+  useEffect(() => {
     if (!device) return;
     if (zoomDeviceRef.current !== device) {
       zoomDeviceRef.current = device;
@@ -424,6 +454,11 @@ function RealOrCameraScreen() {
           ev: boundedExposure,
           developedTimestamp,
         });
+        if (!savedPhotoUri) {
+          setStatusMessage(null);
+          setErrorMessage('Photo library permission is required to save photos.');
+          return;
+        }
         const capturedFrame: ArchivePhoto = {
           id: savedPhotoUri,
           uri: savedPhotoUri,
@@ -738,6 +773,7 @@ function RealOrCameraScreen() {
     if (isWoundRef.current) return;
     isWoundRef.current = true;
     setIsWound(true);
+    playCameraSound(filmAdvanceSound, 'film advance ratchet');
     // eslint-disable-next-line react-hooks/immutability -- Reanimated shared values are mutated from event callbacks.
     leverProgress.value = withSpring(0, { damping: 14, stiffness: 180 });
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(
@@ -745,7 +781,7 @@ function RealOrCameraScreen() {
         console.warn('Unable to play film-advance ratchet feedback.', error);
       },
     );
-  }, [leverProgress]);
+  }, [filmAdvanceSound, leverProgress]);
 
   const filmAdvancePanResponder = React.useMemo(
     () =>
@@ -803,6 +839,7 @@ function RealOrCameraScreen() {
   const handleShutter = () => {
     if (!device || !hasPermission || isCapturing || !isWoundRef.current) return;
 
+    playCameraSound(shutterSound, 'shutter clack');
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(
       (error: unknown) => {
         console.warn('Unable to play shutter haptic feedback.', error);

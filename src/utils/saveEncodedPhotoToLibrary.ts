@@ -8,9 +8,14 @@ import {
 export async function saveEncodedPhotoToLibrary(
   base64Data: string,
   metadata: DevelopedPhotoMetadata,
-): Promise<string> {
+): Promise<string | null> {
   if (!base64Data) {
     throw new Error('Processed photo data is empty.');
+  }
+
+  const { status } = await MediaLibrary.requestPermissionsAsync(false, ['photo']);
+  if (status !== 'granted') {
+    return null;
   }
 
   let outputFile: File | undefined;
@@ -19,16 +24,31 @@ export async function saveEncodedPhotoToLibrary(
     outputFile.create({ intermediates: true });
     await outputFile.write(base64Data, { encoding: 'base64' });
 
-    const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
-    if (!permission.granted) {
-      throw new Error('Photo library permission is required to save this photo.');
+    let asset: Awaited<ReturnType<typeof MediaLibrary.Asset.create>>;
+    try {
+      asset = await MediaLibrary.Asset.create(outputFile.uri);
+    } catch (error: unknown) {
+      throw new Error(
+        `Unable to create the photo library asset: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!asset) {
+      throw new Error('The photo library did not return a created asset.');
     }
 
-    const asset = await MediaLibrary.Asset.create(outputFile.uri);
-    const [uri] = await Promise.all([
-      asset.getUri(),
-      saveDevelopedPhotoMetadata(asset.id, metadata),
-    ]);
+    let uri: string;
+    try {
+      uri = await asset.getUri();
+    } catch (error: unknown) {
+      throw new Error(
+        `Photo was saved, but its library URI could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!uri) {
+      throw new Error('The photo library returned an empty asset URI.');
+    }
+
+    await saveDevelopedPhotoMetadata(asset.id, metadata);
     return uri;
   } finally {
     if (outputFile?.exists) {
