@@ -1002,35 +1002,6 @@ function RealOrCameraScreen() {
           paddingBottom: Math.max(insets.bottom, 12),
         },
       ]}
-      onTouchStart={(event) => {
-        exposureTouchStart.current = {
-          x: event.nativeEvent.pageX,
-          y: event.nativeEvent.pageY,
-        };
-      }}
-      onMoveShouldSetResponder={(event) => {
-        const touchStart = exposureTouchStart.current;
-        if (!touchStart) return false;
-        const dx = event.nativeEvent.pageX - touchStart.x;
-        const dy = event.nativeEvent.pageY - touchStart.y;
-        return Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx);
-      }}
-      onResponderGrant={(event) => {
-        exposureStartY.current =
-          exposureTouchStart.current?.y ?? event.nativeEvent.pageY;
-        exposureStartValue.current = boundedExposure;
-      }}
-      onResponderMove={(event) =>
-        updateExposureFromDrag(event.nativeEvent.pageY)
-      }
-      onResponderRelease={() => {
-        exposureStartY.current = null;
-        exposureTouchStart.current = null;
-      }}
-      onResponderTerminate={() => {
-        exposureStartY.current = null;
-        exposureTouchStart.current = null;
-      }}
     >
       <StatusBar style="light" />
       <View style={styles.topPlate}>
@@ -1098,6 +1069,7 @@ function RealOrCameraScreen() {
             isActive={!archiveVisible}
             allowHapticsAndSystemSoundsPlayback
             zoom={animatedZoom}
+            exposure={boundedExposure}
             constraints={[{ photoHDR: false }]}
             targetResolution={targetResolution}
             onFrame={renderFilmFrame}
@@ -1161,6 +1133,35 @@ function RealOrCameraScreen() {
           <View
             style={styles.exposureIndicator}
             accessibilityLabel={`Exposure ${boundedExposure >= 0 ? '+' : ''}${boundedExposure.toFixed(1)} EV`}
+            onTouchStart={(event) => {
+              exposureTouchStart.current = {
+                x: event.nativeEvent.pageX,
+                y: event.nativeEvent.pageY,
+              };
+            }}
+            onMoveShouldSetResponder={(event) => {
+              const touchStart = exposureTouchStart.current;
+              if (!touchStart) return false;
+              const dx = event.nativeEvent.pageX - touchStart.x;
+              const dy = event.nativeEvent.pageY - touchStart.y;
+              return Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx);
+            }}
+            onResponderGrant={(event) => {
+              exposureStartY.current =
+                exposureTouchStart.current?.y ?? event.nativeEvent.pageY;
+              exposureStartValue.current = boundedExposure;
+            }}
+            onResponderMove={(event) =>
+              updateExposureFromDrag(event.nativeEvent.pageY)
+            }
+            onResponderRelease={() => {
+              exposureStartY.current = null;
+              exposureTouchStart.current = null;
+            }}
+            onResponderTerminate={() => {
+              exposureStartY.current = null;
+              exposureTouchStart.current = null;
+            }}
           >
             <Text style={styles.exposureValue}>
               EV {boundedExposure >= 0 ? '+' : ''}{boundedExposure.toFixed(1)}
